@@ -297,6 +297,7 @@ export async function handleQaInbound(params: {
   channelRuntime?: PluginRuntime["channel"];
 }) {
   const channelRuntime = params.channelRuntime ?? getQaChannelRuntime().channel;
+  const config = params.config as OpenClawConfig;
   const inbound = params.message;
   const target = buildQaTarget({
     chatType: inbound.conversation.kind,
@@ -304,7 +305,7 @@ export async function handleQaInbound(params: {
   });
   const toolCalls: QaBusToolCall[] = [];
   const route = resolveAgentRoute({
-    cfg: params.config as OpenClawConfig,
+    cfg: config,
     channel: params.channelId,
     accountId: params.account.accountId,
     peer: {
@@ -332,13 +333,13 @@ export async function handleQaInbound(params: {
     parentSessionKey: isGroup ? route.sessionKey : undefined,
   });
   const buildEnvelope = createChannelInboundEnvelopeBuilder({
-    cfg: params.config as OpenClawConfig,
+    cfg: config,
     route: { agentId: route.agentId, sessionKey: threadKeys.sessionKey },
   });
   const wasMentioned = isGroup
     ? channelRuntime.mentions.matchesMentionPatterns(
         inbound.text,
-        channelRuntime.mentions.buildMentionRegexes(params.config as OpenClawConfig, route.agentId),
+        channelRuntime.mentions.buildMentionRegexes(config, route.agentId),
       )
     : undefined;
   const groupConfig = isGroup
@@ -469,7 +470,7 @@ export async function handleQaInbound(params: {
   });
 
   await channelRuntime.inbound.dispatch({
-    cfg: params.config as OpenClawConfig,
+    cfg: config,
     channel: params.channelId,
     accountId: params.account.accountId,
     route: { agentId: route.agentId, dmScope: route.dmScope, sessionKey: threadKeys.sessionKey },
