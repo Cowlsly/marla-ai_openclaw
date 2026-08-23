@@ -30,11 +30,20 @@ export type RelayDaemonRun = {
 export async function runExtensionRelayDaemon(params: {
   port: number;
   readToken?: () => string | null;
+  /**
+   * Accept the legacy one-directional relay auth (Bearer/Basic/token
+   * subprotocol). Defaults to false: the standalone daemon is v2-only, so a
+   * process that squats the relay port cannot harvest the secret from a legacy
+   * client, and an operator's `extensionRelay.allowLegacyAuth=false` is never
+   * silently reverted. The extension and mcporter both speak v2.
+   */
+  allowLegacyAuth?: boolean;
   idleExitMs?: number;
   pollMs?: number;
   now?: () => number;
 }): Promise<RelayDaemonRun> {
   const readToken = params.readToken ?? readExtensionRelayToken;
+  const allowLegacyAuth = params.allowLegacyAuth ?? false;
   const now = params.now ?? Date.now;
   const idleExitMs = params.idleExitMs ?? RELAY_DAEMON_IDLE_EXIT_MS;
   const pollMs = params.pollMs ?? IDLE_POLL_MS;
@@ -52,7 +61,7 @@ export async function runExtensionRelayDaemon(params: {
 
   let handle: ExtensionRelayHandle;
   try {
-    handle = await startExtensionRelayServer({ port: params.port, token });
+    handle = await startExtensionRelayServer({ port: params.port, token, allowLegacyAuth });
   } catch (error) {
     if ((error as NodeJS.ErrnoException | null)?.code === "EADDRINUSE") {
       log.info(`relay port ${params.port} is already served; standalone daemon not needed`);
