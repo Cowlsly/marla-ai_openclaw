@@ -35,6 +35,8 @@ export function createPairingConfigStore(storage: {
 
 export function buildRelayWsProtocols(): string[];
 
+export function isDirectLoopbackRelayUrl(raw: unknown): boolean;
+
 export function reconnectDelayMs(attempt: number): number;
 
 export function nearestGroupColor(hex: unknown): string;

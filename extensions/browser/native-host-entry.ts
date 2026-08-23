@@ -1,9 +1,14 @@
+import { fileURLToPath } from "node:url";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import {
   parseBrowserNativeHostOrigins,
   runBrowserNativeHost,
 } from "./src/browser/extension-native-host.js";
-import { buildBrowserExtensionPairing } from "./src/browser/extension-pairing.js";
+import {
+  buildBrowserExtensionPairing,
+  firstExtensionRelayPort,
+} from "./src/browser/extension-pairing.js";
+import { ensureExtensionRelayDaemonProcess } from "./src/browser/extension-relay-daemon-spawn.js";
 
 function requiredArgument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -30,6 +35,13 @@ async function main(): Promise<void> {
       await buildBrowserExtensionPairing({
         cfg: getRuntimeConfig(),
         localTransport: "gateway",
+      }),
+    // The daemon entry is built as this entry's sibling, so resolve it from
+    // this file's own location rather than a shared chunk path.
+    ensureRelay: async () =>
+      await ensureExtensionRelayDaemonProcess({
+        port: firstExtensionRelayPort(getRuntimeConfig()),
+        entryPath: fileURLToPath(new URL("./relay-daemon-entry.js", import.meta.url)),
       }),
   });
   const response = responseFrame;

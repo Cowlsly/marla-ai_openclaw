@@ -51,6 +51,17 @@ function isAllowedWebSocketUrl(url) {
   return url.protocol === "wss:" || (url.protocol === "ws:" && isLoopbackHost(url.hostname));
 }
 
+/** True for a loopback ws:// relay URL on the direct /extension path — the URL the standalone relay daemon serves. */
+export function isDirectLoopbackRelayUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  return url.protocol === "ws:" && isLoopbackHost(url.hostname) && url.pathname === "/extension";
+}
+
 function parseGatewayHint(raw) {
   if (typeof raw !== "string") {
     return null;

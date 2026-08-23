@@ -339,3 +339,44 @@ describe("native host origin and topology boundary", () => {
     });
   });
 });
+
+describe("native host ensure_relay", () => {
+  it("reports the injected relay status with the echoed nonce", async () => {
+    const ensureRelay = vi.fn(async () => "spawned" as const);
+    const result = await invokeHost({
+      input: chunks(frame(requestJson({ op: "ensure_relay" }))),
+      ensureRelay,
+    });
+    expect(result.response).toEqual({ v: 1, ok: true, nonce: NONCE, relay: "spawned" });
+    expect(ensureRelay).toHaveBeenCalledTimes(1);
+    expect(result.writes).toHaveLength(1);
+  });
+
+  it("reports skipped when no relay launcher is wired", async () => {
+    const result = await invokeHost({
+      input: chunks(frame(requestJson({ op: "ensure_relay" }))),
+    });
+    expect(result.response).toEqual({ v: 1, ok: true, nonce: NONCE, relay: "skipped" });
+  });
+
+  it("maps a relay launcher failure to relay_unavailable", async () => {
+    const result = await invokeHost({
+      input: chunks(frame(requestJson({ op: "ensure_relay" }))),
+      ensureRelay: async () => {
+        throw new Error("spawn failed");
+      },
+    });
+    expect(result.response).toEqual({ v: 1, ok: false, code: "relay_unavailable" });
+  });
+
+  it("still validates the manifest before ensuring the relay", async () => {
+    const ensureRelay = vi.fn(async () => "spawned" as const);
+    const result = await invokeHost({
+      input: chunks(frame(requestJson({ op: "ensure_relay" }))),
+      callerOrigin: OTHER_ORIGIN,
+      ensureRelay,
+    });
+    expect(result.response).toEqual({ v: 1, ok: false, code: "origin_forbidden" });
+    expect(ensureRelay).not.toHaveBeenCalled();
+  });
+});

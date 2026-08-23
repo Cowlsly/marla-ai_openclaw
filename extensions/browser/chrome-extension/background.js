@@ -2,6 +2,7 @@ import {
   createNativeBootstrapController,
   discardRetiredCopilotState,
   prepareRetiredCopilotState,
+  requestRelayEnsure,
 } from "./modules/native-bootstrap.js";
 import { createPopupMessageHandler } from "./modules/popup-background.js";
 import { createRelayCommandHandler } from "./modules/relay-command-handler.js";
@@ -17,6 +18,7 @@ import {
   ACCESS_MODE_SELECTED,
   OPENCLAW_TAB_GROUP_TITLE,
   createPairingConfigStore,
+  isDirectLoopbackRelayUrl,
   reconnectDelayMs,
   toRelayTabInfo,
 } from "./modules/relay-core.js";
@@ -30,6 +32,7 @@ const BADGE = {
   on: { text: "ON", color: "#0F9D58" },
   error: { text: "!", color: "#B91C1C" },
 };
+const RELAY_ENSURE_MIN_INTERVAL_MS = 60_000;
 const RELAY_WATCHDOG_ALARM = "openclaw-relay-watchdog";
 const RELAY_OPENING_DEADLINE_ALARM = "openclaw-relay-opening-deadline";
 const RELAY_AUTH_TIMEOUT_MS = 10_000;
@@ -43,6 +46,7 @@ let relayOpeningDeadlineAt = 0;
 let relayOpeningDeadlineTimer = null;
 let relayAuthenticatedSocket = null;
 let relayStatusHint = "";
+let lastRelayEnsureAtMs = 0;
 let reconciledPairingInvalidationRevision = 0;
 let relayConnectionGeneration = 0;
 let relayConnectionsSuspended = false;
@@ -473,6 +477,7 @@ async function connectRelay(isConnectionAllowed = () => true) {
   if (!connectionIsCurrent()) {
     return;
   }
+  maybeEnsureRelayDaemon(relayUrl);
   setBadge("connecting");
   let ws;
   try {
@@ -546,6 +551,23 @@ function handleRelayOpeningDeadline() {
   setBadge("error");
   relayStatusHint = "Relay authentication v2 timed out. Make sure OpenClaw is up to date.";
   scheduleReconnect();
+}
+
+/**
+ * On a reconnect cycle against a direct loopback relay URL, ask the native
+ * host (rate-limited) to spawn the standalone relay daemon so the extension
+ * has something to connect to without a running Gateway.
+ */
+function maybeEnsureRelayDaemon(relayUrl) {
+  if (reconnectAttempt === 0 || !isDirectLoopbackRelayUrl(relayUrl)) {
+    return;
+  }
+  const now = Date.now();
+  if (now - lastRelayEnsureAtMs < RELAY_ENSURE_MIN_INTERVAL_MS) {
+    return;
+  }
+  lastRelayEnsureAtMs = now;
+  void requestRelayEnsure(chrome).catch(() => {});
 }
 
 function scheduleReconnect() {

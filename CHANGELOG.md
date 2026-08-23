@@ -6,6 +6,7 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- **Standalone browser relay:** ship a gateway-free extension relay daemon (`dist/extensions/browser/relay-daemon-entry.js`) and teach the native messaging host a rate-limited `ensure_relay` op, so the Chrome extension can wake the relay on demand and CDP clients (mcporter, Playwright) drive the paired browser without a running Gateway.
 - **Secret egress host binding:** bind each shared-store secret to exact HTTPS destination hosts across CLI, Gateway RPC, and Control UI so unbound sentinel substitution fails closed before plaintext egress.
 - **Release validation:** defer beta candidate Parallels smoke to postpublish `release:beta-smoke` by default, keep stable/full prepublish coverage, and bound nested release workflow monitors with explicit job timeouts.
 - **macOS app profiles:** isolate named app instances across state, preferences, Keychain, Gateway services, and duplicate-instance ownership while keeping host-global login and node services untouched.

@@ -12,10 +12,13 @@ type BrowserNativeFailureCode =
   | "origin_forbidden"
   | "manifest_invalid"
   | "manual_required"
-  | "pairing_unavailable";
-type BrowserNativeBootstrapRequest = { v: 1; op: "bootstrap"; nonce: string };
+  | "pairing_unavailable"
+  | "relay_unavailable";
+export type BrowserNativeRelayEnsureStatus = "spawned" | "running" | "skipped";
+type BrowserNativeBootstrapRequest = { v: 1; op: "bootstrap" | "ensure_relay"; nonce: string };
 export type BrowserNativeBootstrapResponse =
   | { v: 1; ok: true; nonce: string; pairingString: string }
+  | { v: 1; ok: true; nonce: string; relay: BrowserNativeRelayEnsureStatus }
   | { v: 1; ok: false; code: BrowserNativeFailureCode };
 
 function readNativeUint32(buffer: Buffer, offset = 0): number {
@@ -150,8 +153,10 @@ function parseBrowserNativeRequest(raw: string): BrowserNativeBootstrapRequest |
     return null;
   }
   const record = asNullableRecord(parsed);
-  return record?.v === 1 && record.op === "bootstrap" && isCanonicalNonce(record.nonce)
-    ? { v: 1, op: "bootstrap", nonce: record.nonce }
+  return record?.v === 1 &&
+    (record.op === "bootstrap" || record.op === "ensure_relay") &&
+    isCanonicalNonce(record.nonce)
+    ? { v: 1, op: record.op, nonce: record.nonce }
     : null;
 }
 

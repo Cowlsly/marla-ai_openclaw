@@ -7,6 +7,7 @@ import {
   nearestGroupColor,
   parsePairingString,
   reconnectDelayMs,
+  isDirectLoopbackRelayUrl,
 } from "./relay-core.js";
 
 const RELAY_SECRET = "a".repeat(64);
@@ -390,5 +391,22 @@ describe("nearestGroupColor", () => {
   it("falls back to orange for invalid input", () => {
     expect(nearestGroupColor("not-a-color")).toBe("orange");
     expect(nearestGroupColor(undefined)).toBe("orange");
+  });
+});
+
+describe("isDirectLoopbackRelayUrl", () => {
+  it("accepts only loopback ws:// URLs on the direct /extension path", () => {
+    expect(isDirectLoopbackRelayUrl("ws://127.0.0.1:18799/extension")).toBe(true);
+    expect(isDirectLoopbackRelayUrl("ws://localhost:18799/extension")).toBe(true);
+    expect(isDirectLoopbackRelayUrl("ws://[::1]:18799/extension")).toBe(true);
+  });
+
+  it("rejects gateway routes, remote hosts, and malformed values", () => {
+    expect(isDirectLoopbackRelayUrl("ws://127.0.0.1:18789/browser/extension")).toBe(false);
+    expect(isDirectLoopbackRelayUrl("wss://gateway.example.com/browser/extension")).toBe(false);
+    expect(isDirectLoopbackRelayUrl("ws://10.0.0.5:18799/extension")).toBe(false);
+    expect(isDirectLoopbackRelayUrl("http://127.0.0.1:18799/extension")).toBe(false);
+    expect(isDirectLoopbackRelayUrl("not a url")).toBe(false);
+    expect(isDirectLoopbackRelayUrl(undefined)).toBe(false);
   });
 });
