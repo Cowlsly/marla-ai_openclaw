@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  classifyRelaySecretPrivacy,
   ensureExtensionRelayToken,
   readExtensionRelayToken,
   resolveExtensionRelayToken,
@@ -67,5 +68,50 @@ describe("extension relay host-local secret", () => {
     } finally {
       fs.rmSync(otherDir, { recursive: true, force: true });
     }
+  });
+
+  const secretFilePath = (): string =>
+    path.join(stateDir, "credentials", "browser-extension-relay.secret");
+
+  it.runIf(process.platform !== "win32")(
+    "self-heals a group/other-readable secret to 0600 and still reads it",
+    async () => {
+      const token = await ensureExtensionRelayToken();
+      const secretPath = secretFilePath();
+      fs.chmodSync(secretPath, 0o644);
+      // Reading tightens the mode back to private and still returns the token.
+      expect(readExtensionRelayToken()).toBe(token);
+      expect(fs.statSync(secretPath).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it("refuses a symlinked secret", async () => {
+    const token = await ensureExtensionRelayToken();
+    const secretPath = secretFilePath();
+    const realTarget = path.join(stateDir, "elsewhere.secret");
+    fs.renameSync(secretPath, realTarget);
+    fs.symlinkSync(realTarget, secretPath);
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(readExtensionRelayToken()).toBeNull();
+  });
+});
+
+describe("classifyRelaySecretPrivacy", () => {
+  it("accepts a private, self-owned file", () => {
+    expect(classifyRelaySecretPrivacy({ uid: 501, mode: 0o600 }, 501, "linux")).toBe("ok");
+  });
+
+  it("flags a self-owned file with broad mode for healing", () => {
+    expect(classifyRelaySecretPrivacy({ uid: 501, mode: 0o644 }, 501, "linux")).toBe("heal");
+    expect(classifyRelaySecretPrivacy({ uid: 501, mode: 0o660 }, 501, "linux")).toBe("heal");
+  });
+
+  it("refuses a foreign-owned file regardless of mode", () => {
+    expect(classifyRelaySecretPrivacy({ uid: 0, mode: 0o600 }, 501, "linux")).toBe("refuse");
+  });
+
+  it("trusts Windows ACLs and an unknown uid instead of POSIX bits", () => {
+    expect(classifyRelaySecretPrivacy({ uid: 0, mode: 0o777 }, 501, "win32")).toBe("ok");
+    expect(classifyRelaySecretPrivacy({ uid: 0, mode: 0o777 }, undefined, "linux")).toBe("ok");
   });
 });
