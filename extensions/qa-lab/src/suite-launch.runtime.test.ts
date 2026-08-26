@@ -2041,6 +2041,27 @@ describe("qa suite runtime launcher", () => {
     );
   });
 
+  it("leaves nested E2E script runtime preparation to the script owner", async () => {
+    const repoRoot = await makeTempRepo("qa-suite-script-runtime-owner-");
+
+    await runQaSuite({
+      repoRoot,
+      outputDir: ".artifacts/qa-e2e/script-runtime-owner",
+      scenarioIds: ["managed-gateway-service-lifecycle"],
+    });
+
+    expect(runQaTestFileScenarios).toHaveBeenCalledTimes(1);
+    const [call] = runQaTestFileScenarios.mock.calls[0] ?? [];
+    expect(call.scenarios).toEqual([
+      expect.objectContaining({
+        id: "managed-gateway-service-lifecycle",
+        execution: expect.objectContaining({ kind: "script" }),
+      }),
+    ]);
+    expect(call).not.toHaveProperty("env");
+    expect(call).not.toHaveProperty("envMode");
+  });
+
   it("streams native owner progress without exposing child output to CI", async () => {
     const repoRoot = await makeTempRepo("qa-suite-safe-native-progress-");
     vi.stubEnv("OPENCLAW_QA_SUITE_PROGRESS", "1");

@@ -418,6 +418,7 @@ async function resolveSuiteExecutionPlan(
 
 async function runQaTestFileSuiteFromRuntime(params: {
   env?: NodeJS.ProcessEnv;
+  kind: QaTestFileExecutionKind;
   runParams: QaSuiteRunParams | undefined;
   scenarios: readonly QaTestFileScenario[];
 }): Promise<QaTestFileScenarioRunResult> {
@@ -431,11 +432,13 @@ async function runQaTestFileSuiteFromRuntime(params: {
     evidenceMode: runParams?.evidenceMode,
     ...(params.env
       ? { env: params.env, envMode: "replace" as const }
-      : {
-          // The owning QA process already loaded the prepared runtime. Native
-          // child setup must not clean or rebuild those files under live gateways.
-          env: { OPENCLAW_E2E_USE_PREBUILT_DIST: "1" },
-        }),
+      : params.kind !== "script"
+        ? {
+            // The owning QA process already loaded the prepared runtime. Native
+            // child setup must not clean or rebuild those files under live gateways.
+            env: { OPENCLAW_E2E_USE_PREBUILT_DIST: "1" },
+          }
+        : {}),
     ...(runParams?.failFast ? { failFast: true } : {}),
     ...(shouldLogQaSuiteProgress()
       ? { progress: (message: string) => writeQaSuiteProgress(true, message) }
@@ -1084,6 +1087,7 @@ async function runUnifiedQaSuite(params: {
           );
           const result = await runQaTestFileSuiteFromRuntime({
             env: kind === "script" ? preparedScriptEnv : undefined,
+            kind,
             runParams: {
               ...params.runParams,
               outputDir: suitePartitionOutputDir(outputDir, kind),
