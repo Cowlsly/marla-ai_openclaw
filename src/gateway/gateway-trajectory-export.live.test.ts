@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EventFrame } from "../../packages/gateway-protocol/src/index.js";
+import { GATEWAY_CLIENT_CAPS, type EventFrame } from "../../packages/gateway-protocol/src/index.js";
 import { isLiveTestEnabled } from "../agents/live-test-helpers.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { setTestEnvValue } from "../test-utils/env.js";
@@ -52,7 +52,7 @@ type TrajectoryExportApprovalSummary = {
 };
 
 type TrajectoryExportSignal = {
-  approvalId?: string;
+  approvalId: string;
   instructionText: string;
 };
 
@@ -138,6 +138,7 @@ async function connectGatewayClient(params: {
     requestTimeoutMs: 60_000,
     tickWatchTimeoutMs: AGENT_REQUEST_TIMEOUT_MS + 120_000,
     clientDisplayName: "trajectory-live",
+    caps: [GATEWAY_CLIENT_CAPS.EXEC_APPROVALS],
     onEvent: params.onEvent,
   });
   return client;
@@ -291,6 +292,13 @@ async function waitForTrajectoryExportSignal(params: {
   let nextHistoryPollAt = 0;
   while (Date.now() < deadline) {
     const newEvents = params.events.slice(params.eventStartIndex);
+    const projectedApproval = newEvents
+      .filter((event) => event.event === "exec.approval.requested")
+      .map((event) => event.payload as TrajectoryExportApprovalEntry)
+      .find(isTrajectoryExportApproval);
+    if (projectedApproval && !approvalId) {
+      approvalId = await approveTrajectoryExport(params.client, projectedApproval);
+    }
     finalTexts = newEvents
       .map((event) => extractChatFinalText(event, params.runId))
       .filter((text): text is string => typeof text === "string" && text.trim().length > 0);
@@ -298,8 +306,8 @@ async function waitForTrajectoryExportSignal(params: {
       [...(params.initialTexts ?? []), ...finalTexts, ...(assistantTexts ?? [])],
       params.expectedTexts,
     );
-    if (matchedText) {
-      return { ...(approvalId ? { approvalId } : {}), instructionText: matchedText };
+    if (matchedText && approvalId) {
+      return { approvalId, instructionText: matchedText };
     }
     if (Date.now() >= nextHistoryPollAt) {
       try {
@@ -316,23 +324,12 @@ async function waitForTrajectoryExportSignal(params: {
           [...(params.initialTexts ?? []), ...finalTexts, ...assistantTexts],
           params.expectedTexts,
         );
-        if (matchedHistoryText) {
-          return { ...(approvalId ? { approvalId } : {}), instructionText: matchedHistoryText };
+        if (matchedHistoryText && approvalId) {
+          return { approvalId, instructionText: matchedHistoryText };
         }
       } catch {
         assistantTexts = [];
       }
-      try {
-        const approvals = (await params.client.request(
-          "exec.approval.list",
-          {},
-          { timeoutMs: 10_000 },
-        )) as TrajectoryExportApprovalEntry[];
-        const approval = approvals.find(isTrajectoryExportApproval);
-        if (approval && !approvalId) {
-          approvalId = await approveTrajectoryExport(params.client, approval);
-        }
-      } catch {}
       nextHistoryPollAt = Date.now() + 2_000;
     }
     await new Promise((resolve) => {
@@ -408,30 +405,10 @@ function extractVisibleMessageText(message: unknown): string | undefined {
 
 async function approveTrajectoryExport(
   client: GatewayClient,
-  existingApproval?: TrajectoryExportApprovalEntry,
+  approval: TrajectoryExportApprovalEntry,
 ): Promise<string> {
-  const startedAt = Date.now();
-  let approval: TrajectoryExportApprovalEntry | undefined = existingApproval;
-  let lastApprovalSummaries: TrajectoryExportApprovalSummary[] = [];
-  while (!approval && Date.now() - startedAt < 60_000) {
-    const approvals = (await client.request(
-      "exec.approval.list",
-      {},
-      { timeoutMs: 10_000 },
-    )) as TrajectoryExportApprovalEntry[];
-    lastApprovalSummaries = approvals.map(summarizeTrajectoryExportApproval);
-    approval = approvals.find(isTrajectoryExportApproval);
-    if (approval) {
-      break;
-    }
-    await new Promise((resolve) => {
-      setTimeout(resolve, 500);
-    });
-  }
-  if (!approval?.id) {
-    throw new Error(
-      `expected trajectory export approval id; approvals=${JSON.stringify(lastApprovalSummaries)}`,
-    );
+  if (!approval.id) {
+    throw new Error("expected projected trajectory export approval id");
   }
   expect(isTrajectoryExportApproval(approval)).toBe(true);
   await client.request(
@@ -585,7 +562,7 @@ describeLive("gateway live trajectory export", () => {
       expect(exportSignal.instructionText).toContain("Trajectory exports can include");
       expect(exportSignal.instructionText).toContain("through exec approval");
       expect(exportSignal.instructionText).toContain("Approve once");
-      const approvalId = exportSignal.approvalId ?? (await approveTrajectoryExport(client));
+      const approvalId = exportSignal.approvalId;
       logLiveStep("export:approved", { approvalId });
       await waitForPath(path.join(bundleDir, "events.jsonl"), 60_000);
       logLiveStep("export:done", { approvalId, finalText: exportSignal.instructionText });
