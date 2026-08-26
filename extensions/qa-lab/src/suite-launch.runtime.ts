@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { formatErrorMessage, toErrorObject } from "openclaw/plugin-sdk/error-runtime";
+import { runPluginCommandWithTimeout } from "openclaw/plugin-sdk/run-command";
 import { isRepoRootRelativeRef, toRepoRelativePath } from "./cli-paths.js";
 import { QaSuiteArtifactError, QaSuiteInfraError } from "./errors.js";
 import {
@@ -446,6 +447,21 @@ async function runQaTestFileSuiteFromRuntime(params: {
     scenarios: params.scenarios,
     writeEvidenceFile: runParams?.writeEvidenceFile,
   });
+}
+
+async function prepareQaSuiteNativeRuntime(repoRoot: string) {
+  const argv = [
+    process.execPath,
+    "--import",
+    "tsx",
+    "scripts/tsdown-build.mts",
+    "--config",
+    "tsdown.ai.config.ts",
+  ];
+  const result = await runPluginCommandWithTimeout({ argv, cwd: repoRoot, timeoutMs: 20 * 60_000 });
+  if (result.code !== 0) {
+    throw new Error(`QA suite runtime preparation failed (${argv.join(" ")}): ${result.stderr}`);
+  }
 }
 
 function rejectFlowOnlySuiteOptionsForUnifiedRun(runParams: QaSuiteRunParams | undefined) {
@@ -1312,6 +1328,11 @@ async function runUnifiedQaSuite(params: {
         })
       : await runWeightedUnifiedPartitionTasks(retryingTasks, maxWeight);
   };
+  // Native children opt out of their destructive global build only after this
+  // scheduler has established the shared runtime they consume concurrently.
+  if (concurrentTestFileScenariosByKind.size > 0) {
+    await prepareQaSuiteNativeRuntime(repoRoot);
+  }
   const concurrentPartitionResults = await runPartitionTasks(concurrentPartitionTasks, concurrency);
   const concurrentFailed = failFast && concurrentPartitionResults.some(partitionFailed);
   let scriptPreparationFailure: QaUnifiedPartitionResult | undefined;

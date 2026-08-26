@@ -18,12 +18,14 @@ const {
   crablineRuntimeLoads,
   prepareDockerE2eEnvironment,
   replaceFileAtomicMock,
+  runPluginCommandWithTimeout,
   runQaFlowSuite,
   runQaTestFileScenarios,
 } = vi.hoisted(() => ({
   crablineRuntimeLoads: vi.fn(),
   prepareDockerE2eEnvironment: vi.fn(),
   replaceFileAtomicMock: vi.fn(),
+  runPluginCommandWithTimeout: vi.fn(),
   runQaFlowSuite: vi.fn(),
   runQaTestFileScenarios: vi.fn(),
 }));
@@ -47,6 +49,8 @@ vi.mock("./test-file-scenario-docker-batch.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./test-file-scenario-docker-batch.js")>()),
   prepareDockerE2eEnvironment,
 }));
+
+vi.mock("openclaw/plugin-sdk/run-command", () => ({ runPluginCommandWithTimeout }));
 
 vi.mock("openclaw/plugin-sdk/security-runtime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/security-runtime")>();
@@ -246,6 +250,8 @@ describe("qa suite runtime launcher", () => {
     runQaTestFileScenarios.mockReset();
     prepareDockerE2eEnvironment.mockReset();
     prepareDockerE2eEnvironment.mockResolvedValue(undefined);
+    runPluginCommandWithTimeout.mockReset();
+    runPluginCommandWithTimeout.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
     runQaFlowSuite.mockImplementation(
       async (
         params:
@@ -1224,8 +1230,21 @@ describe("qa suite runtime launcher", () => {
     );
   });
 
-  it("keeps native Vitest setup on the suite-prepared runtime", async () => {
+  it("prepares a missing native runtime before marking the child prebuilt", async () => {
     const repoRoot = await makeTempRepo("qa-suite-prepared-vitest-");
+    const aiRuntimePath = path.join(repoRoot, "packages/ai/dist/internal/runtime.mjs");
+    runPluginCommandWithTimeout.mockImplementation(async ({ argv }) => {
+      if (argv.includes("tsdown.ai.config.ts")) {
+        await fs.mkdir(path.dirname(aiRuntimePath), { recursive: true });
+        await fs.writeFile(aiRuntimePath, "export {};\n", "utf8");
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const defaultTestFileImplementation = requireDefaultQaTestFileImplementation();
+    runQaTestFileScenarios.mockImplementationOnce(async (params) => {
+      await expect(fs.stat(aiRuntimePath)).resolves.toBeDefined();
+      return await defaultTestFileImplementation(params);
+    });
 
     await runQaSuite({
       repoRoot,
@@ -1240,6 +1259,16 @@ describe("qa suite runtime launcher", () => {
       }),
     );
     expect(runQaTestFileScenarios.mock.calls[0]?.[0]).not.toHaveProperty("envMode");
+    expect(runPluginCommandWithTimeout.mock.calls.map(([options]) => options.argv)).toEqual([
+      [
+        process.execPath,
+        "--import",
+        "tsx",
+        "scripts/tsdown-build.mts",
+        "--config",
+        "tsdown.ai.config.ts",
+      ],
+    ]);
   });
 
   it("projects a skipped native producer as a skipped unified scenario", async () => {
