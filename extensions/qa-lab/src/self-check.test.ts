@@ -112,10 +112,7 @@ describe("createQaSelfCheckScenario", () => {
         };
       }
       const message = state.readMessage({ messageId: String(args.messageId) });
-      if (
-        args.to !== `channel:${message.conversation.id}` ||
-        args.threadId !== message.threadId
-      ) {
+      if (args.to !== `channel:${message.conversation.id}` || args.threadId !== message.threadId) {
         throw new Error("qa-channel message is not in the selected conversation");
       }
       targets.push(args.to);
