@@ -480,6 +480,7 @@ describe("qa suite runtime agent process helpers", () => {
           to: "transport-target",
           replyChannel: "reply-channel",
           replyTo: "reply-target",
+          threadId: "adapter-thread",
         })),
       },
     } as never;
@@ -499,6 +500,7 @@ describe("qa suite runtime agent process helpers", () => {
           replyChannel?: string;
           replyTo?: string;
           sessionKey?: string;
+          threadId?: string;
           to?: string;
         }
       | undefined;
@@ -508,6 +510,7 @@ describe("qa suite runtime agent process helpers", () => {
     expect(agentPayload?.to).toBe("transport-target");
     expect(agentPayload?.replyChannel).toBe("reply-channel");
     expect(agentPayload?.replyTo).toBe("reply-target");
+    expect(agentPayload?.threadId).toBe("adapter-thread");
     expect(gatewayArgs?.[2]).toBeTypeOf("object");
   });
 

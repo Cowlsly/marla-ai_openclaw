@@ -119,7 +119,9 @@ async function startAgentRun(
       to: delivery.to ?? target,
       replyChannel: delivery.replyChannel,
       replyTo: delivery.replyTo,
-      ...(params.threadId ? { threadId: params.threadId } : {}),
+      ...((delivery.threadId ?? params.threadId)
+        ? { threadId: delivery.threadId ?? params.threadId }
+        : {}),
       ...(params.provider ? { provider: params.provider } : {}),
       ...(params.model ? { model: params.model } : {}),
       ...(params.attachments ? { attachments: params.attachments } : {}),
