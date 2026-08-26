@@ -431,8 +431,8 @@ class QaCrablineTransport extends QaStateBackedTransportAdapter {
     );
     this.#state.rememberProviderTarget(providerTargetKey, logicalTarget);
     return {
-      ...delivery,
       ...(logicalTarget.threadId ? { threadId: logicalTarget.threadId } : {}),
+      ...delivery,
     };
   };
 
