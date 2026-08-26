@@ -18,6 +18,7 @@ import {
   tryResolveDefaultAgentId,
 } from "../agents/agent-scope.js";
 import { reloadSharedAuthStoreOwnership } from "../agents/auth-profiles/path-resolve.js";
+import { clearRuntimeAuthProfileStoreSnapshots } from "../agents/auth-profiles/runtime-snapshots.js";
 import { normalizeThinkLevel } from "../auto-reply/thinking.shared.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { getRuntimeConfig, type OpenClawConfig } from "../config/config.js";
@@ -1391,8 +1392,11 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
               ...invocation.options,
             }),
           );
-          if (result.exitCode === 0 && !result.signal) {
+          if (result.exitCode === 0 && !result.signal && !codexBin) {
             reloadSharedAuthStoreOwnership();
+            // The auth child persisted outside this process. Invalidate the
+            // published generation so retained local runtimes rebuild from it.
+            clearRuntimeAuthProfileStoreSnapshots();
           }
           return result;
         })
