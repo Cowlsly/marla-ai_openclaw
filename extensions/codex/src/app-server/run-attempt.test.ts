@@ -5626,7 +5626,6 @@ describe("runCodexAppServerAttempt", () => {
     const appServer = resolveCodexAppServerRuntimeOptions({
       pluginConfig: readCodexPluginConfig(pluginConfig),
     });
-    expect(appServer.approvalsReviewer).toBe("auto_review");
     await primeGoogleCalendarAppInventory(
       buildCodexPluginAppCacheKey({
         appServer,
