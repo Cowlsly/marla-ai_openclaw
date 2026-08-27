@@ -562,7 +562,7 @@ describe("Codex plugin thread config", () => {
       open_world_enabled: true,
       default_tools_approval_mode: "auto",
     });
-    expect(config.configPatch).not.toHaveProperty("approvals_reviewer");
+    expect(config.configPatch).toHaveProperty("approvals_reviewer", "user");
     expect(config.policyContext.apps["google-calendar-app"]).toMatchObject({
       allowDestructiveActions: true,
       destructiveApprovalMode: "ask",
@@ -611,6 +611,7 @@ describe("Codex plugin thread config", () => {
       const apps = config.configPatch?.apps as Record<string, unknown> | undefined;
       const app = apps?.["google-calendar-app"] as Record<string, unknown> | undefined;
       expect(app?.approvals_reviewer).toBe(expectedReviewer);
+      expect(config.configPatch?.approvals_reviewer).toBe(expectedReviewer);
       expect(config.policyContext.apps["google-calendar-app"]?.destructiveApprovalMode).toBe(
         pluginOverride === true ? "allow" : pluginOverride === false ? "deny" : pluginOverride,
       );
@@ -645,6 +646,7 @@ describe("Codex plugin thread config", () => {
     });
 
     expect(configPatch).toEqual({
+      approvals_reviewer: "user",
       apps: {
         _default: {
           enabled: false,
@@ -666,7 +668,6 @@ describe("Codex plugin thread config", () => {
         },
       },
     });
-    expect(configPatch).not.toHaveProperty("approvals_reviewer");
   });
 
   it("keeps ask policy apps when managed approval overrides cover only read-only tools", async () => {

@@ -461,7 +461,7 @@ export async function buildCodexPluginThreadConfig(
     };
   }
 
-  const configPatch = { apps };
+  const configPatch = buildAppsConfigPatch(apps, policyApps);
   const policyContext = buildPluginAppPolicyContext(policyApps, pluginAppIds);
   return {
     enabled: true,
@@ -587,7 +587,20 @@ export function buildCodexPluginAppsConfigPatchFromPolicyContext(
       ...(policy.destructiveApprovalMode === "ask" ? { approvals_reviewer: "user" } : {}),
     };
   }
-  return { apps };
+  return buildAppsConfigPatch(apps, policyContext.apps);
+}
+
+function buildAppsConfigPatch(
+  apps: JsonObject,
+  policyApps: Record<string, CodexAppPolicyContextEntry>,
+): JsonObject {
+  const requiresUserApproval = Object.values(policyApps).some(
+    (policy) => policy.destructiveApprovalMode === "ask",
+  );
+  return {
+    ...(requiresUserApproval ? { approvals_reviewer: "user" } : {}),
+    apps,
+  };
 }
 
 export function buildPluginAppPolicyContext(

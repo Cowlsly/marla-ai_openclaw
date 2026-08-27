@@ -187,6 +187,7 @@ function createDeferredNamedDynamicTool(
 
 function createPluginAppConfigPatch(options: { approvalsReviewer?: "user" } = {}) {
   return {
+    ...(options.approvalsReviewer ? { approvals_reviewer: options.approvalsReviewer } : {}),
     apps: {
       _default: {
         enabled: false,
@@ -3816,8 +3817,8 @@ describe("Codex app-server thread lifecycle bindings", () => {
     ]);
     const threadRequests = requestCalls.filter(([method]) => method !== "config/read");
     expect(threadRequests.map(([, requestParams]) => requestParams.approvalsReviewer)).toEqual([
-      "auto_review",
-      "auto_review",
+      "user",
+      "user",
     ]);
     expect(threadRequests[0]?.[1].config).toEqual({
       "features.hooks": true,

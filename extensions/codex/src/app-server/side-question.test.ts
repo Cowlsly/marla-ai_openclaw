@@ -1290,9 +1290,9 @@ describe("runCodexAppServerSideQuestion", () => {
     ).resolves.toEqual({ text: "Side answer." });
 
     const forkParams = mockCall(client.request)[1] as Record<string, unknown> | undefined;
-    expect(forkParams?.approvalsReviewer).toBe("auto_review");
+    expect(forkParams?.approvalsReviewer).toBe("user");
     const config = forkParams?.config as Record<string, unknown> | undefined;
-    expect(config).not.toHaveProperty("approvals_reviewer");
+    expect(config).toHaveProperty("approvals_reviewer", "user");
     expect(config?.["features.code_mode"]).toBe(true);
     expect(config?.apps).toEqual({
       _default: {
