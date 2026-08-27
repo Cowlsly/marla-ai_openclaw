@@ -46,6 +46,26 @@ describe("compactWithSafetyTimeout", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("refreshes the safety window when serial compaction starts another model request", async () => {
+    vi.useFakeTimers();
+    const compactPromise = compactWithSafetyTimeout(async (_signal, resetTimeout) => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 20);
+      });
+      resetTimeout();
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 20);
+      });
+      return "ok";
+    }, 30);
+
+    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(compactPromise).resolves.toBe("ok");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("preserves compaction errors and clears timer", async () => {
     vi.useFakeTimers();
     const error = new Error("provider exploded");

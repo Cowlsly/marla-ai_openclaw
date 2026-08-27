@@ -26,7 +26,7 @@ export function resolveCompactionTimeoutMs(cfg?: OpenClawConfig): number {
 }
 
 export async function compactWithSafetyTimeout<T>(
-  compact: (abortSignal?: AbortSignal) => Promise<T>,
+  compact: (abortSignal: AbortSignal | undefined, resetTimeout: () => void) => Promise<T>,
   timeoutMs: number = EMBEDDED_COMPACTION_TIMEOUT_MS,
   opts?: {
     abortSignal?: AbortSignal;
@@ -48,7 +48,7 @@ export async function compactWithSafetyTimeout<T>(
   };
 
   return await runAbortableTimeout(
-    async (timeoutSignal) => {
+    async (timeoutSignal, resetTimeout) => {
       let timeoutListener: (() => void) | undefined;
       let externalAbortListener: (() => void) | undefined;
       let externalAbortPromise: Promise<never> | undefined;
@@ -80,7 +80,7 @@ export async function compactWithSafetyTimeout<T>(
       }
 
       try {
-        const compactPromise = compact(composedAbortSignal);
+        const compactPromise = compact(composedAbortSignal, resetTimeout);
         if (externalAbortPromise) {
           return await Promise.race([compactPromise, externalAbortPromise]);
         }
