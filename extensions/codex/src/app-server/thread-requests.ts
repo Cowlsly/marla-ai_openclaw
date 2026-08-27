@@ -24,6 +24,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./protocol.js";
+import { resolveCodexThreadApprovalsReviewer } from "./thread-approval-reviewer.js";
 import {
   CODEX_NATIVE_PERSONALITY_NONE,
   resolveCodexAppServerModelProvider,
@@ -32,6 +33,8 @@ import {
 import { buildDeveloperInstructions } from "./thread-prompt.js";
 import { applyCodexManagedShellEnvironment } from "./thread-shell-environment.js";
 import { resolveCodexWebSearchPlan, type CodexNativeWebSearchSupport } from "./web-search.js";
+
+export { resolveCodexThreadApprovalsReviewer } from "./thread-approval-reviewer.js";
 
 export const CODEX_RING_ZERO_BASE_INSTRUCTIONS = "";
 
@@ -718,13 +721,6 @@ function hasNonEmptyJsonValue(value: JsonValue): boolean {
     return Object.values(value).some(hasNonEmptyJsonValue);
   }
   return true;
-}
-
-export function resolveCodexThreadApprovalsReviewer(
-  appServer: CodexAppServerRuntimeOptions,
-  config?: JsonObject,
-): CodexAppServerRuntimeOptions["approvalsReviewer"] {
-  return config?.approvals_reviewer === "user" ? "user" : appServer.approvalsReviewer;
 }
 
 export function codexThreadSandboxOrPermissions(

@@ -129,6 +129,7 @@ import {
   type CodexAppServerClientLease,
   type CodexAppServerClientOptions,
 } from "./shared-client.js";
+import { resolveCodexThreadApprovalsReviewer } from "./thread-approval-reviewer.js";
 import {
   buildCodexRuntimeThreadConfig,
   CODEX_NATIVE_PERSONALITY_NONE,
@@ -137,7 +138,6 @@ import {
   resolveCodexBindingModelProviderFallback,
   resolveReasoningEffort,
 } from "./thread-lifecycle.js";
-import { resolveCodexThreadApprovalsReviewer } from "./thread-requests.js";
 import { filterCodexVisionTools } from "./vision-tools.js";
 import {
   resolveCodexWebSearchPlan,

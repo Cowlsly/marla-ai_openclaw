@@ -17,6 +17,7 @@ import {
   ensureCodexPluginActivation,
   type CodexPluginActivationResult,
 } from "./plugin-activation.js";
+import { buildCodexPluginAppsApprovalConfigPatch } from "./plugin-apps-config-patch.js";
 import {
   readCodexPluginInventory,
   type CodexPluginInventory,
@@ -461,7 +462,7 @@ export async function buildCodexPluginThreadConfig(
     };
   }
 
-  const configPatch = buildAppsConfigPatch(apps, policyApps);
+  const configPatch = buildCodexPluginAppsApprovalConfigPatch(apps, policyApps);
   const policyContext = buildPluginAppPolicyContext(policyApps, pluginAppIds);
   return {
     enabled: true,
@@ -587,20 +588,7 @@ export function buildCodexPluginAppsConfigPatchFromPolicyContext(
       ...(policy.destructiveApprovalMode === "ask" ? { approvals_reviewer: "user" } : {}),
     };
   }
-  return buildAppsConfigPatch(apps, policyContext.apps);
-}
-
-function buildAppsConfigPatch(
-  apps: JsonObject,
-  policyApps: Record<string, CodexAppPolicyContextEntry>,
-): JsonObject {
-  const requiresUserApproval = Object.values(policyApps).some(
-    (policy) => policy.destructiveApprovalMode === "ask",
-  );
-  return {
-    ...(requiresUserApproval ? { approvals_reviewer: "user" } : {}),
-    apps,
-  };
+  return buildCodexPluginAppsApprovalConfigPatch(apps, policyContext.apps);
 }
 
 export function buildPluginAppPolicyContext(
