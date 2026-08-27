@@ -103,8 +103,7 @@ export async function compactWithSafetyTimeout<T>(
 type ContextEngineCompactParams = Parameters<ContextEngine["compact"]>[0];
 
 /**
- * Invoke a plugin-owned {@link ContextEngine.compact} bounded by the same
- * finite safety timeout that protects native runtime compaction.
+ * Invoke {@link ContextEngine.compact} at its timeout ownership boundary.
  *
  * Plugin context engines that advertise `ownsCompaction` previously had their
  * `compact()` awaited with no timeout, no watchdog, and no abort signal — a
@@ -119,15 +118,19 @@ type ContextEngineCompactParams = Parameters<ContextEngine["compact"]>[0];
  *    `compact()` params (so cooperating engines can cancel their own in-flight
  *    work).
  *
- * Callers keep their existing try/catch — a timeout or abort surfaces as a
- * thrown error, never a silent hang.
+ * Delegating engines call the native runtime directly because it owns its own
+ * progress-aware watchdog. Callers keep their existing try/catch — a timeout
+ * or abort surfaces as a thrown error, never a silent hang.
  */
 export function compactContextEngineWithSafetyTimeout(
-  contextEngine: Pick<ContextEngine, "compact">,
+  contextEngine: Pick<ContextEngine, "compact" | "info">,
   params: ContextEngineCompactParams,
   timeoutMs: number = EMBEDDED_COMPACTION_TIMEOUT_MS,
   abortSignal?: AbortSignal,
 ): Promise<CompactResult> {
+  if (contextEngine.info.ownsCompaction !== true) {
+    return contextEngine.compact(abortSignal ? { ...params, abortSignal } : params);
+  }
   return compactWithSafetyTimeout(
     (compactAbortSignal) =>
       contextEngine.compact(

@@ -947,20 +947,27 @@ export async function loadCompactHooksHarness(): Promise<{
     return {
       compactWithSafetyTimeout: compactWithSafetyTimeoutMock,
       resolveCompactionTimeoutMs: vi.fn(() => 30_000),
-      // Mirror the real wrapper: bound the engine's compact() with the
-      // (mocked) safety timeout and thread the abort signal into its params.
+      // Mirror the real owner split: bound plugin-owned compaction and let a
+      // delegating engine use the native runtime's watchdog.
       compactContextEngineWithSafetyTimeout: vi.fn(
         (
-          contextEngine: { compact: (params: Record<string, unknown>) => Promise<unknown> },
+          contextEngine: {
+            info: { ownsCompaction?: boolean };
+            compact: (params: Record<string, unknown>) => Promise<unknown>;
+          },
           params: Record<string, unknown>,
           timeoutMs?: number,
           abortSignal?: AbortSignal,
-        ) =>
-          compactWithSafetyTimeoutMock(
+        ) => {
+          if (contextEngine.info.ownsCompaction !== true) {
+            return contextEngine.compact(abortSignal ? { ...params, abortSignal } : params);
+          }
+          return compactWithSafetyTimeoutMock(
             () => contextEngine.compact(abortSignal ? { ...params, abortSignal } : params),
             timeoutMs,
             abortSignal ? { abortSignal } : undefined,
-          ),
+          );
+        },
       ),
     };
   });

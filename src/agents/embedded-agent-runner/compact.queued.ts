@@ -734,52 +734,44 @@ async function compactResolvedContextEngine(
             });
           }
         }
-        // Bound plugin-owned compaction here. A delegating engine calls the native
-        // runtime, whose own watchdog follows serial model-request progress; wrapping
-        // it again would turn that request-sized timeout into an aggregate deadline.
+        // The wrapper bounds plugin-owned engines here and lets delegating engines
+        // use the native runtime's progress-aware watchdog.
         let result: Awaited<ReturnType<typeof contextEngine.compact>>;
         try {
           const compactionSessionTarget = buildContextEngineCompactionSessionTarget(params);
-          const compactParams: Parameters<typeof contextEngine.compact>[0] = {
-            sessionId: params.sessionId,
-            sessionKey: hookSessionKey,
-            ...(compactionSessionTarget.agentId
-              ? { agentId: compactionSessionTarget.agentId }
-              : {}),
-            sessionTarget: compactionSessionTarget,
-            tokenBudget: contextTokenBudget,
-            currentTokenCount: params.currentTokenCount,
-            compactionTarget: params.trigger === "manual" ? "threshold" : "budget",
-            customInstructions: params.customInstructions,
-            force:
-              params.force === true ||
-              params.forcePreflight === true ||
-              params.preflightRequired === true ||
-              params.trigger === "manual",
-            runtimeContext: {
-              ...runtimeContext,
-              forceReason:
-                params.forcePreflight === true || params.preflightRequired === true
-                  ? "preflight_required"
-                  : params.trigger === "manual"
-                    ? "manual"
-                    : undefined,
-              preflightCompactionTrigger: params.preflightCompactionTrigger,
+          result = await compactContextEngineWithSafetyTimeout(
+            contextEngine,
+            {
+              sessionId: params.sessionId,
+              sessionKey: hookSessionKey,
+              ...(compactionSessionTarget.agentId
+                ? { agentId: compactionSessionTarget.agentId }
+                : {}),
+              sessionTarget: compactionSessionTarget,
+              tokenBudget: contextTokenBudget,
+              currentTokenCount: params.currentTokenCount,
+              compactionTarget: params.trigger === "manual" ? "threshold" : "budget",
+              customInstructions: params.customInstructions,
+              force:
+                params.force === true ||
+                params.forcePreflight === true ||
+                params.preflightRequired === true ||
+                params.trigger === "manual",
+              runtimeContext: {
+                ...runtimeContext,
+                forceReason:
+                  params.forcePreflight === true || params.preflightRequired === true
+                    ? "preflight_required"
+                    : params.trigger === "manual"
+                      ? "manual"
+                      : undefined,
+                preflightCompactionTrigger: params.preflightCompactionTrigger,
+              },
+              runtimeSettings: contextEngineRuntimeSettings,
             },
-            runtimeSettings: contextEngineRuntimeSettings,
-          };
-          result = engineOwnsCompaction
-            ? await compactContextEngineWithSafetyTimeout(
-                contextEngine,
-                compactParams,
-                resolveCompactionTimeoutMs(params.config),
-                params.abortSignal,
-              )
-            : await contextEngine.compact(
-                params.abortSignal
-                  ? { ...compactParams, abortSignal: params.abortSignal }
-                  : compactParams,
-              );
+            resolveCompactionTimeoutMs(params.config),
+            params.abortSignal,
+          );
         } catch (compactErr) {
           log.warn("context-engine compaction failed", {
             errorMessage: formatErrorMessage(compactErr),
