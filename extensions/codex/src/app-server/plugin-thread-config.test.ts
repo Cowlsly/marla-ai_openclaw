@@ -744,6 +744,7 @@ describe("Codex plugin thread config", () => {
     });
 
     expect(config.configPatch).toEqual({
+      approvals_reviewer: "user",
       apps: {
         _default: {
           enabled: false,
@@ -2851,6 +2852,7 @@ describe("Codex plugin thread config", () => {
     });
 
     expect(config.configPatch).toEqual({
+      approvals_reviewer: "user",
       apps: {
         _default: {
           enabled: false,

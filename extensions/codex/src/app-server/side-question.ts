@@ -137,6 +137,7 @@ import {
   resolveCodexBindingModelProviderFallback,
   resolveReasoningEffort,
 } from "./thread-lifecycle.js";
+import { resolveCodexThreadApprovalsReviewer } from "./thread-requests.js";
 import { filterCodexVisionTools } from "./vision-tools.js";
 import {
   resolveCodexWebSearchPlan,
@@ -748,7 +749,7 @@ export async function runCodexAppServerSideQuestion(
                 ? { runtimeWorkspaceRoots: [sessionPermissionPolicy.root] }
                 : {}),
               approvalPolicy,
-              approvalsReviewer: appServer.approvalsReviewer,
+              approvalsReviewer: resolveCodexThreadApprovalsReviewer(appServer, threadConfig),
               ...(sandboxEnvironment || appServer.networkProxy ? {} : { sandbox }),
               ...(serviceTier ? { serviceTier } : {}),
               config: threadConfig,
