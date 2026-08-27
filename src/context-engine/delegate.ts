@@ -220,6 +220,11 @@ export async function delegateCompactionToRuntime(
   };
 }
 
+/** True only for the canonical bridge whose runtime owns the compaction watchdog. */
+export function isRuntimeCompactionDelegate(compact: ContextEngine["compact"]): boolean {
+  return compact === delegateCompactionToRuntime;
+}
+
 /**
  * Build a context-engine-ready systemPromptAddition from the active memory
  * plugin prompt path. This lets non-legacy engines explicitly opt into the

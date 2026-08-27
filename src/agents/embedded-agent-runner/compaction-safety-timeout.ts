@@ -3,6 +3,7 @@
  */
 import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { isRuntimeCompactionDelegate } from "../../context-engine/delegate.js";
 import type { CompactResult, ContextEngine } from "../../context-engine/types.js";
 import { createAbortError } from "../../infra/abort-signal.js";
 import { runAbortableTimeout } from "../../node-host/with-timeout.js";
@@ -118,9 +119,10 @@ type ContextEngineCompactParams = Parameters<ContextEngine["compact"]>[0];
  *    `compact()` params (so cooperating engines can cancel their own in-flight
  *    work).
  *
- * Delegating engines call the native runtime directly because it owns its own
- * progress-aware watchdog. Callers keep their existing try/catch — a timeout
- * or abort surfaces as a thrown error, never a silent hang.
+ * The canonical built-in delegate calls the native runtime directly because
+ * that runtime owns its own progress-aware watchdog. Every other engine stays
+ * host-bounded, including wrappers that do not advertise `ownsCompaction`, so
+ * an incomplete or hung implementation cannot silently disable the timeout.
  */
 export function compactContextEngineWithSafetyTimeout(
   contextEngine: Pick<ContextEngine, "compact" | "info">,
@@ -128,7 +130,7 @@ export function compactContextEngineWithSafetyTimeout(
   timeoutMs: number = EMBEDDED_COMPACTION_TIMEOUT_MS,
   abortSignal?: AbortSignal,
 ): Promise<CompactResult> {
-  if (contextEngine.info.ownsCompaction !== true) {
+  if (isRuntimeCompactionDelegate(contextEngine.compact)) {
     return contextEngine.compact(abortSignal ? { ...params, abortSignal } : params);
   }
   return compactWithSafetyTimeout(

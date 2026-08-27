@@ -1,6 +1,7 @@
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { delegateCompactionToRuntime } from "../../context-engine/delegate.js";
 import { OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST } from "../../context-engine/host-compat.js";
 import { buildContextEngineRuntimeSettings } from "../../context-engine/runtime-settings.js";
 import type { ContextEngine, ContextEngineRuntimeContext } from "../../context-engine/types.js";
@@ -15,16 +16,18 @@ import { createEmbeddedRunContextRecoveryState } from "./run/context-recovery-st
 import type { PreparedEmbeddedRunInput } from "./run/execution-context.js";
 import type { EmbeddedRunAttemptResult } from "./run/types.js";
 
-type CompactionResult = Awaited<ReturnType<ContextEngine["compact"]>>;
-
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const completionMocks = vi.hoisted(() => ({
   prepareSimpleCompletionModelForAgent: vi.fn(),
   completeWithPreparedSimpleCompletionModel: vi.fn(),
   resolveSimpleCompletionSelectionForAgent: vi.fn(),
 }));
+const compactRuntimeMocks = vi.hoisted(() => ({
+  compactEmbeddedAgentSessionOnDemand: vi.fn(),
+}));
 
 vi.mock("../simple-completion-runtime.js", () => completionMocks);
+vi.mock("./compact.runtime.js", () => compactRuntimeMocks);
 
 // Keep this dedicated leaf on the compaction composition boundary. Runtime/auth/lane policy is
 // covered at its direct owners so this shard never reloads the complete public runner graph.
@@ -59,7 +62,10 @@ function makeAttempt(overrides: Partial<EmbeddedRunAttemptResult> = {}): Embedde
   };
 }
 
-function makeContextEngine(compact = vi.fn(), ownsCompaction = true): ContextEngine {
+function makeContextEngine(
+  compact: ContextEngine["compact"] | ReturnType<typeof vi.fn> = vi.fn(),
+  ownsCompaction = true,
+): ContextEngine {
   return {
     info: { id: "test", name: "Test", ownsCompaction },
     ingest: vi.fn(),
@@ -117,6 +123,7 @@ function makeRecoveryInput(
 
 describe("compactEmbeddedRunForRecovery", () => {
   beforeEach(() => {
+    compactRuntimeMocks.compactEmbeddedAgentSessionOnDemand.mockReset();
     completionMocks.prepareSimpleCompletionModelForAgent.mockReset();
     completionMocks.completeWithPreparedSimpleCompletionModel.mockReset();
     completionMocks.resolveSimpleCompletionSelectionForAgent.mockReset();
@@ -217,13 +224,13 @@ describe("compactEmbeddedRunForRecovery", () => {
     async (trigger) => {
       vi.useFakeTimers();
       try {
-        const compact = vi.fn(
+        compactRuntimeMocks.compactEmbeddedAgentSessionOnDemand.mockImplementationOnce(
           () =>
-            new Promise<CompactionResult>((resolve) => {
+            new Promise((resolve) => {
               setTimeout(() => resolve({ ok: true, compacted: false }), 1_100);
             }),
         );
-        const contextEngine = makeContextEngine(compact, false);
+        const contextEngine = makeContextEngine(delegateCompactionToRuntime, false);
         const pending = compactEmbeddedRunForRecovery(
           makeRecoveryInput({
             runParams: {
@@ -246,7 +253,7 @@ describe("compactEmbeddedRunForRecovery", () => {
 
         await vi.advanceTimersByTimeAsync(1_100);
         await assertion;
-        expect(compact).toHaveBeenCalledOnce();
+        expect(compactRuntimeMocks.compactEmbeddedAgentSessionOnDemand).toHaveBeenCalledOnce();
       } finally {
         vi.useRealTimers();
       }

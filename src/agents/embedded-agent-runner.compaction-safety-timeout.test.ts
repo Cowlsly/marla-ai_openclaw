@@ -1,5 +1,7 @@
 // Covers safety timeouts around embedded-agent compaction calls.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isRuntimeCompactionDelegate } from "../context-engine/delegate.js";
+import { LegacyContextEngine } from "../context-engine/legacy.js";
 import type { CompactResult, ContextEngine } from "../context-engine/types.js";
 import {
   compactContextEngineWithSafetyTimeout,
@@ -249,26 +251,29 @@ describe("compactContextEngineWithSafetyTimeout", () => {
     ).resolves.toBe(result);
   });
 
-  it("leaves delegated native compaction to its own progress-aware watchdog", async () => {
+  it("keeps a non-owning custom engine bounded", async () => {
     vi.useFakeTimers();
-    const result: CompactResult = { ok: true, compacted: false };
-    const compact = vi.fn<CompactFn>(
-      () =>
-        new Promise((resolve) => {
-          setTimeout(() => resolve(result), 40);
-        }),
-    );
+    const compact = vi.fn<CompactFn>(() => new Promise<CompactResult>(() => {}));
 
     const pending = compactContextEngineWithSafetyTimeout(
       makeEngine(compact, false),
       baseParams,
       30,
     );
-    const assertion = expect(pending).resolves.toBe(result);
+    const assertion = expect(pending).rejects.toThrow("Compaction timed out");
 
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(30);
     await assertion;
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("recognizes only the canonical built-in runtime delegate", () => {
+    const engine = new LegacyContextEngine();
+    const wrapped = async (params: Parameters<ContextEngine["compact"]>[0]) =>
+      engine.compact(params);
+
+    expect(isRuntimeCompactionDelegate(engine.compact)).toBe(true);
+    expect(isRuntimeCompactionDelegate(wrapped)).toBe(false);
   });
 
   it("threads a signal that follows the run abort signal into the plugin compact() params", async () => {

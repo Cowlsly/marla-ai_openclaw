@@ -947,8 +947,8 @@ export async function loadCompactHooksHarness(): Promise<{
     return {
       compactWithSafetyTimeout: compactWithSafetyTimeoutMock,
       resolveCompactionTimeoutMs: vi.fn(() => 30_000),
-      // Mirror the real owner split: bound plugin-owned compaction and let a
-      // delegating engine use the native runtime's watchdog.
+      // Mirror the real owner split: only this harness's canonical native
+      // delegate mock bypasses the outer watchdog; every custom wrapper stays bounded.
       compactContextEngineWithSafetyTimeout: vi.fn(
         (
           contextEngine: {
@@ -959,7 +959,10 @@ export async function loadCompactHooksHarness(): Promise<{
           timeoutMs?: number,
           abortSignal?: AbortSignal,
         ) => {
-          if (contextEngine.info.ownsCompaction !== true) {
+          if (
+            contextEngine.info.ownsCompaction !== true &&
+            contextEngine.compact === contextEngineCompactMock
+          ) {
             return contextEngine.compact(abortSignal ? { ...params, abortSignal } : params);
           }
           return compactWithSafetyTimeoutMock(
