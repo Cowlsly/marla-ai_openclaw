@@ -186,7 +186,10 @@ async function readSessionCompanionContext(params: {
       const pageIsPartial = page.newestContiguousEventCount !== page.scannedMessages;
       // Sparse bounded pages may include older rows beyond an oversized gap.
       // Only the contiguous newest suffix is authoritative companion context.
-      const pageEvents = page.events.slice(page.events.length - page.newestContiguousEventCount);
+      const pageEvents =
+        page.newestContiguousEventCount === page.events.length
+          ? page.events
+          : page.events.slice(page.events.length - page.newestContiguousEventCount);
       rawBytes += page.serializedBytes;
       scannedMessages += page.scannedMessages;
       offset += page.scannedMessages;
