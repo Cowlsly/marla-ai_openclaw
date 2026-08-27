@@ -5611,7 +5611,7 @@ describe("runCodexAppServerAttempt", () => {
   it("keeps an ask-mode app on the user reviewer for turn/start", async () => {
     const { sessionFile, workspaceDir, agentDir } = createRunPaths();
     const pluginConfig = {
-      appServer: { mode: "guardian" },
+      appServer: { mode: "guardian", approvalsReviewer: "auto_review" },
       codexPlugins: {
         enabled: true,
         plugins: {
