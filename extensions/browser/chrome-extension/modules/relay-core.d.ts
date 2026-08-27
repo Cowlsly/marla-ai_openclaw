@@ -35,7 +35,7 @@ export function createPairingConfigStore(storage: {
 
 export function buildRelayWsProtocols(): string[];
 
-export function isDirectLoopbackRelayUrl(raw: unknown): boolean;
+export function directLoopbackRelayPort(raw: unknown): number | null;
 
 export function reconnectDelayMs(attempt: number): number;
 

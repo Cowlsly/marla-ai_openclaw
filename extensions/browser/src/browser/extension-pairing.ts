@@ -14,7 +14,7 @@ type BrowserExtensionPairing = {
 
 type PairingConfig = OpenClawConfig & { browser?: BrowserConfig };
 
-export function firstExtensionRelayPort(cfg: PairingConfig): number {
+function firstExtensionRelayPort(cfg: PairingConfig): number {
   const resolved = resolveBrowserConfig(cfg.browser, cfg);
   for (const [name, profile] of Object.entries(resolved.profiles)) {
     if (profile.driver === "extension") {

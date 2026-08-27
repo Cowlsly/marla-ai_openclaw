@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createSecretFileAtomic, tryReadSecretFileSync } from "openclaw/plugin-sdk/secret-file";
 import { resolveOAuthDir } from "openclaw/plugin-sdk/state-paths";
+import { extractErrorCode } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 
 const log = createSubsystemLogger("browser").child("extension-relay");
@@ -32,36 +33,6 @@ function normalizeToken(raw: string): string | null {
 }
 
 /**
- * The relay secret is the whole auth model: anyone who can read it drives the
- * user's real browser, and loopback is not a trust boundary on a multi-user
- * host. The fs-safe reader rejects symlinks/hardlinks but does not re-check the
- * file mode or owner on read, so a secret whose permissions drifted
- * group/other-readable (loosened umask, restore, shared home) would still be
- * trusted. Classify the file's privacy before use.
- */
-export type RelaySecretPrivacy = "ok" | "heal" | "refuse";
-
-/**
- * Pure privacy decision for a secret file's stat. `heal`: we own it but the
- * mode is too broad — tighten to 0600 and continue. `refuse`: owned by another
- * user (never trust a foreign-owned credential). Windows uses ACLs, not POSIX
- * mode bits, and the create path establishes them, so it is always `ok` here.
- */
-export function classifyRelaySecretPrivacy(
-  stat: { uid: number; mode: number },
-  selfUid: number | undefined,
-  platform: NodeJS.Platform = process.platform,
-): RelaySecretPrivacy {
-  if (platform === "win32" || selfUid === undefined) {
-    return "ok";
-  }
-  if (stat.uid !== selfUid) {
-    return "refuse";
-  }
-  return (stat.mode & 0o077) === 0 ? "ok" : "heal";
-}
-
-/**
  * Return the secret path only when it is safe to read: absent (caller handles
  * null), already private, or self-healable by tightening our own file's mode.
  * Refuses a foreign-owned or unhealable file so a world-readable credential is
@@ -74,18 +45,20 @@ function resolveUsableRelaySecretPath(env: NodeJS.ProcessEnv): string | null {
     stat = fs.lstatSync(secretPath);
   } catch (err) {
     // Absent is the normal "not paired yet" case; let the reader return null.
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? secretPath : null;
+    return extractErrorCode(err) === "ENOENT" ? secretPath : null;
   }
   if (stat.isSymbolicLink() || !stat.isFile()) {
     log.warn("ignoring extension relay secret: not a regular file");
     return null;
   }
-  const decision = classifyRelaySecretPrivacy(stat, process.getuid?.());
-  if (decision === "refuse") {
+  // The safe reader checks file type/link count, not ownership or POSIX mode.
+  // Windows creation uses ACLs; do not interpret its synthetic mode bits.
+  const selfUid = process.platform === "win32" ? undefined : process.getuid?.();
+  if (selfUid !== undefined && stat.uid !== selfUid) {
     log.warn("ignoring extension relay secret: owned by another user");
     return null;
   }
-  if (decision === "heal") {
+  if (selfUid !== undefined && (stat.mode & 0o077) !== 0) {
     try {
       fs.chmodSync(secretPath, PRIVATE_SECRET_FILE_MODE);
       log.warn("tightened extension relay secret permissions to 0600");
@@ -134,16 +107,20 @@ export async function ensureExtensionRelayToken(
     });
     return token;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "secret-exists") {
+    if (extractErrorCode(err) !== "secret-exists") {
       throw err;
     }
     // Another process created it first; its exclusive async write may still be
     // finishing after the final name appears, so adopt it with a bounded reread.
     // Reuse the hardened sync read so a foreign-owned file is never adopted here.
     for (let attempt = 0; attempt < RELAY_SECRET_REREAD_ATTEMPTS; attempt += 1) {
-      const winner = readExtensionRelayToken(env);
-      if (winner) {
-        return winner;
+      try {
+        const winner = readExtensionRelayToken(env);
+        if (winner) {
+          return winner;
+        }
+      } catch {
+        // The safe reader rejects an empty file during the exclusive write.
       }
       await new Promise<void>((resolve) => {
         setTimeout(resolve, RELAY_SECRET_REREAD_DELAY_MS);

@@ -93,11 +93,11 @@ function sendNativeBootstrap(chromeApi, request) {
 const RELAY_ENSURE_STATUSES = new Set(["spawned", "running", "skipped"]);
 
 /** Ask the native host to start the standalone relay daemon when nothing serves the relay port. */
-export async function requestRelayEnsure(chromeApi = chrome) {
+export async function requestRelayEnsure(relayPort, chromeApi = chrome) {
   const nonce = randomRelayBase64Url(crypto, 16);
   let response;
   try {
-    response = await sendNativeBootstrap(chromeApi, { v: 1, op: "ensure_relay", nonce });
+    response = await sendNativeBootstrap(chromeApi, { v: 1, op: "ensure_relay", nonce, relayPort });
   } catch {
     return { status: "unavailable" };
   }

@@ -418,3 +418,62 @@ describe("relay pairing and authentication", () => {
     expect(harness.storageValues).not.toHaveProperty("relayUrl");
   });
 });
+
+describe("standalone relay wake-up", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+  });
+
+  afterEach(async () => {
+    await cleanupBackgroundHarnesses();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([18798, 20123])(
+    "wakes the paired port %i on reconnect, at most once per minute",
+    async (relayPort) => {
+      const harness = await loadBackground({
+        storedConfig: { relayUrl: `ws://127.0.0.1:${relayPort}/extension`, token: TEST_RELAY_KEY },
+        nativeMessage: async (request) => ({
+          v: 1,
+          ok: true,
+          nonce: (request as { nonce: string }).nonce,
+          relay: "spawned",
+        }),
+      });
+      expect(harness.sendNativeMessage).not.toHaveBeenCalled();
+      harness.relaySockets.at(-1)?.close();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(harness.sendNativeMessage).toHaveBeenCalledExactlyOnceWith(
+        "ai.openclaw.browser_bootstrap",
+        { v: 1, op: "ensure_relay", nonce: expect.any(String), relayPort },
+      );
+      harness.relaySockets.at(-1)?.close();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(harness.relaySockets).toHaveLength(3);
+      expect(harness.sendNativeMessage).toHaveBeenCalledOnce();
+      vi.setSystemTime(Date.now() + 60_000);
+      harness.relaySockets.at(-1)?.close();
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(harness.sendNativeMessage).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    ["local Gateway", "ws://127.0.0.1:18789/browser/extension", false],
+    ["remote Gateway", "wss://gateway.example.com/browser/extension", false],
+    ["secure loopback", "wss://localhost:18798/extension", false],
+    ["automatic setup opt-out", "ws://127.0.0.1:18798/extension", true],
+  ])("does not wake a daemon for %s", async (_label, relayUrl, nativeBootstrapDisabled) => {
+    const harness = await loadBackground({
+      storedConfig: { relayUrl, token: TEST_RELAY_KEY, nativeBootstrapDisabled },
+    });
+    harness.relaySockets.at(-1)?.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(harness.relaySockets).toHaveLength(2);
+    expect(harness.sendNativeMessage).not.toHaveBeenCalled();
+  });
+});

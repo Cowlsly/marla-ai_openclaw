@@ -7,7 +7,7 @@ import {
   nearestGroupColor,
   parsePairingString,
   reconnectDelayMs,
-  isDirectLoopbackRelayUrl,
+  directLoopbackRelayPort,
 } from "./relay-core.js";
 
 const RELAY_SECRET = "a".repeat(64);
@@ -394,19 +394,31 @@ describe("nearestGroupColor", () => {
   });
 });
 
-describe("isDirectLoopbackRelayUrl", () => {
+describe("directLoopbackRelayPort", () => {
   it("accepts only loopback ws:// URLs on the direct /extension path", () => {
-    expect(isDirectLoopbackRelayUrl("ws://127.0.0.1:18799/extension")).toBe(true);
-    expect(isDirectLoopbackRelayUrl("ws://localhost:18799/extension")).toBe(true);
-    expect(isDirectLoopbackRelayUrl("ws://[::1]:18799/extension")).toBe(true);
+    expect(directLoopbackRelayPort("ws://127.0.0.1:18799/extension")).toBe(18799);
+    expect(directLoopbackRelayPort("ws://localhost:18799/extension")).toBe(18799);
+    expect(directLoopbackRelayPort("ws://[::1]:18799/extension")).toBe(18799);
+    expect(directLoopbackRelayPort("ws://127.0.0.1:20123/extension?profile=work")).toBe(20123);
   });
 
   it("rejects gateway routes, remote hosts, and malformed values", () => {
-    expect(isDirectLoopbackRelayUrl("ws://127.0.0.1:18789/browser/extension")).toBe(false);
-    expect(isDirectLoopbackRelayUrl("wss://gateway.example.com/browser/extension")).toBe(false);
-    expect(isDirectLoopbackRelayUrl("ws://10.0.0.5:18799/extension")).toBe(false);
-    expect(isDirectLoopbackRelayUrl("http://127.0.0.1:18799/extension")).toBe(false);
-    expect(isDirectLoopbackRelayUrl("not a url")).toBe(false);
-    expect(isDirectLoopbackRelayUrl(undefined)).toBe(false);
+    expect(directLoopbackRelayPort("ws://127.0.0.1:18789/browser/extension")).toBeNull();
+    expect(directLoopbackRelayPort("wss://gateway.example.com/browser/extension")).toBeNull();
+    expect(directLoopbackRelayPort("ws://10.0.0.5:18799/extension")).toBeNull();
+    expect(directLoopbackRelayPort("http://127.0.0.1:18799/extension")).toBeNull();
+    expect(directLoopbackRelayPort("not a url")).toBeNull();
+    expect(directLoopbackRelayPort(undefined)).toBeNull();
+  });
+
+  it.each([
+    "ws://user:password@127.0.0.1:18799/extension",
+    "ws://127.0.0.1:18799/extension#secret",
+    "ws://127.0.0.1:18799/extension?host=remote",
+    "ws://127.0.0.1:18799/extension?profile=one&profile=two",
+    "ws://127.0.0.1:0/extension",
+    "wss://127.0.0.1:18799/extension",
+  ])("rejects noncanonical or unsupported wake-up target %s", (url) => {
+    expect(directLoopbackRelayPort(url)).toBeNull();
   });
 });

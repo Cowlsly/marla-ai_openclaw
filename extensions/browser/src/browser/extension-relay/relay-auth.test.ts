@@ -2,13 +2,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createSecretFileAtomic } from "openclaw/plugin-sdk/secret-file";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  classifyRelaySecretPrivacy,
   ensureExtensionRelayToken,
   readExtensionRelayToken,
   resolveExtensionRelayToken,
 } from "./relay-auth.js";
+
+vi.mock("openclaw/plugin-sdk/secret-file", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/secret-file")>();
+  return { ...actual, createSecretFileAtomic: vi.fn(actual.createSecretFileAtomic) };
+});
 
 let stateDir = "";
 const prevStateDir = process.env.OPENCLAW_STATE_DIR;
@@ -18,6 +23,7 @@ beforeEach(() => {
   process.env.OPENCLAW_STATE_DIR = stateDir;
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   if (prevStateDir === undefined) {
     delete process.env.OPENCLAW_STATE_DIR;
   } else {
@@ -57,6 +63,30 @@ describe("extension relay host-local secret", () => {
     expect(readExtensionRelayToken()).toBe(first);
   });
 
+  it("waits for an exclusive first writer to finish its secret", async () => {
+    const winner = "ab".repeat(32);
+    let finishWrite = Promise.resolve();
+    vi.mocked(createSecretFileAtomic).mockImplementationOnce(async ({ rootDir, filePath }) => {
+      fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(filePath, "", { mode: 0o600 });
+      finishWrite = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          fs.writeFileSync(filePath, winner);
+          resolve();
+        }, 25);
+      });
+      throw Object.assign(new Error("another process created the secret"), {
+        code: "secret-exists",
+      });
+    });
+    try {
+      await expect(ensureExtensionRelayToken()).resolves.toBe(winner);
+      expect(readExtensionRelayToken()).toBe(winner);
+    } finally {
+      await finishWrite;
+    }
+  });
+
   it("gives different hosts (state dirs) different secrets", async () => {
     const a = await ensureExtensionRelayToken();
     const otherDir = fs.realpathSync(
@@ -73,15 +103,40 @@ describe("extension relay host-local secret", () => {
   const secretFilePath = (): string =>
     path.join(stateDir, "credentials", "browser-extension-relay.secret");
 
-  it.runIf(process.platform !== "win32")(
-    "self-heals a group/other-readable secret to 0600 and still reads it",
-    async () => {
+  it.runIf(process.platform !== "win32").each([0o644, 0o660])(
+    "self-heals a secret with mode %i to 0600 and still reads it",
+    async (mode) => {
       const token = await ensureExtensionRelayToken();
       const secretPath = secretFilePath();
-      fs.chmodSync(secretPath, 0o644);
+      fs.chmodSync(secretPath, mode);
       // Reading tightens the mode back to private and still returns the token.
       expect(readExtensionRelayToken()).toBe(token);
       expect(fs.statSync(secretPath).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "refuses a foreign-owned secret without changing it",
+    async () => {
+      const token = await ensureExtensionRelayToken();
+      const secretPath = secretFilePath();
+      const owner = fs.statSync(secretPath).uid;
+      vi.spyOn(process, "getuid").mockReturnValue(owner + 1);
+      expect(readExtensionRelayToken()).toBeNull();
+      await expect(ensureExtensionRelayToken()).rejects.toThrow("unreadable/malformed");
+      expect(fs.readFileSync(secretPath, "utf8").trim()).toBe(token);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "refuses a broad-mode secret when tightening fails",
+    async () => {
+      await ensureExtensionRelayToken();
+      fs.chmodSync(secretFilePath(), 0o644);
+      vi.spyOn(fs, "chmodSync").mockImplementation(() => {
+        throw new Error("permission denied");
+      });
+      expect(readExtensionRelayToken()).toBeNull();
     },
   );
 
@@ -93,25 +148,5 @@ describe("extension relay host-local secret", () => {
     fs.symlinkSync(realTarget, secretPath);
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(readExtensionRelayToken()).toBeNull();
-  });
-});
-
-describe("classifyRelaySecretPrivacy", () => {
-  it("accepts a private, self-owned file", () => {
-    expect(classifyRelaySecretPrivacy({ uid: 501, mode: 0o600 }, 501, "linux")).toBe("ok");
-  });
-
-  it("flags a self-owned file with broad mode for healing", () => {
-    expect(classifyRelaySecretPrivacy({ uid: 501, mode: 0o644 }, 501, "linux")).toBe("heal");
-    expect(classifyRelaySecretPrivacy({ uid: 501, mode: 0o660 }, 501, "linux")).toBe("heal");
-  });
-
-  it("refuses a foreign-owned file regardless of mode", () => {
-    expect(classifyRelaySecretPrivacy({ uid: 0, mode: 0o600 }, 501, "linux")).toBe("refuse");
-  });
-
-  it("trusts Windows ACLs and an unknown uid instead of POSIX bits", () => {
-    expect(classifyRelaySecretPrivacy({ uid: 0, mode: 0o777 }, 501, "win32")).toBe("ok");
-    expect(classifyRelaySecretPrivacy({ uid: 0, mode: 0o777 }, undefined, "linux")).toBe("ok");
   });
 });

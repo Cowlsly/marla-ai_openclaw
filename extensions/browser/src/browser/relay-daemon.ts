@@ -1,3 +1,4 @@
+import { extractErrorCode } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { readExtensionRelayToken } from "./extension-relay/relay-auth.js";
 import {
@@ -8,12 +9,12 @@ import {
 const log = createSubsystemLogger("browser").child("relay-daemon");
 
 /** Default grace before a daemon with no extension and no CDP clients exits. */
-export const RELAY_DAEMON_IDLE_EXIT_MS = 10 * 60 * 1000;
+const RELAY_DAEMON_IDLE_EXIT_MS = 10 * 60 * 1000;
 const IDLE_POLL_MS = 30 * 1000;
 
-export type RelayDaemonExitReason = "port-in-use" | "no-credential" | "idle" | "stopped";
+type RelayDaemonExitReason = "port-in-use" | "no-credential" | "idle" | "stopped";
 
-export type RelayDaemonRun = {
+type RelayDaemonRun = {
   /** Resolves when the daemon decides to exit; the caller owns process.exit. */
   done: Promise<RelayDaemonExitReason>;
   /** Bound relay port when the server started; null when startup was refused. */
@@ -63,7 +64,7 @@ export async function runExtensionRelayDaemon(params: {
   try {
     handle = await startExtensionRelayServer({ port: params.port, token, allowLegacyAuth });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === "EADDRINUSE") {
+    if (extractErrorCode(error) === "EADDRINUSE") {
       log.info(`relay port ${params.port} is already served; standalone daemon not needed`);
       resolveDone("port-in-use");
       return { done, port: null, stop: () => {} };

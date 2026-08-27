@@ -51,15 +51,26 @@ function isAllowedWebSocketUrl(url) {
   return url.protocol === "wss:" || (url.protocol === "ws:" && isLoopbackHost(url.hostname));
 }
 
-/** True for a loopback ws:// relay URL on the direct /extension path — the URL the standalone relay daemon serves. */
-export function isDirectLoopbackRelayUrl(raw) {
+/** Return the paired standalone relay port; Gateway and remote routes cannot wake a local daemon. */
+export function directLoopbackRelayPort(raw) {
   let url;
   try {
     url = new URL(raw);
   } catch {
-    return false;
+    return null;
   }
-  return url.protocol === "ws:" && isLoopbackHost(url.hostname) && url.pathname === "/extension";
+  const port = Number(url.port || 80);
+  return url.protocol === "ws:" &&
+    isLoopbackHost(url.hostname) &&
+    url.pathname === "/extension" &&
+    port > 0 &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    normalizeRelayQuery(url) &&
+    url.toString() === raw
+    ? port
+    : null;
 }
 
 function parseGatewayHint(raw) {

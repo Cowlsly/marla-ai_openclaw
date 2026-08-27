@@ -15,7 +15,9 @@ type BrowserNativeFailureCode =
   | "pairing_unavailable"
   | "relay_unavailable";
 export type BrowserNativeRelayEnsureStatus = "spawned" | "running" | "skipped";
-type BrowserNativeBootstrapRequest = { v: 1; op: "bootstrap" | "ensure_relay"; nonce: string };
+type BrowserNativeBootstrapRequest =
+  | { v: 1; op: "bootstrap"; nonce: string }
+  | { v: 1; op: "ensure_relay"; nonce: string; relayPort: number };
 export type BrowserNativeBootstrapResponse =
   | { v: 1; ok: true; nonce: string; pairingString: string }
   | { v: 1; ok: true; nonce: string; relay: BrowserNativeRelayEnsureStatus }
@@ -142,10 +144,6 @@ function parseBrowserNativeRequest(raw: string): BrowserNativeBootstrapRequest |
   if (!keys || new Set(keys).size !== keys.length) {
     return null;
   }
-  const expected = ["v", "op", "nonce"];
-  if (keys.length !== expected.length || !expected.every((key) => keys.includes(key))) {
-    return null;
-  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -153,10 +151,23 @@ function parseBrowserNativeRequest(raw: string): BrowserNativeBootstrapRequest |
     return null;
   }
   const record = asNullableRecord(parsed);
-  return record?.v === 1 &&
-    (record.op === "bootstrap" || record.op === "ensure_relay") &&
-    isCanonicalNonce(record.nonce)
-    ? { v: 1, op: record.op, nonce: record.nonce }
+  if (record?.v !== 1 || !isCanonicalNonce(record.nonce)) {
+    return null;
+  }
+  const expected =
+    record.op === "ensure_relay" ? ["v", "op", "nonce", "relayPort"] : ["v", "op", "nonce"];
+  if (keys.length !== expected.length || !expected.every((key) => keys.includes(key))) {
+    return null;
+  }
+  if (record.op === "bootstrap") {
+    return { v: 1, op: "bootstrap", nonce: record.nonce };
+  }
+  return record.op === "ensure_relay" &&
+    typeof record.relayPort === "number" &&
+    Number.isInteger(record.relayPort) &&
+    record.relayPort >= 1 &&
+    record.relayPort <= 65_535
+    ? { v: 1, op: "ensure_relay", nonce: record.nonce, relayPort: record.relayPort }
     : null;
 }
 

@@ -138,7 +138,7 @@ export async function runBrowserNativeHost(params: {
   write: (frame: Buffer) => void;
   buildPairing: () => Promise<{ pairingString: string; topology: string }>;
   /** Ensure the standalone extension relay daemon is running (ensure_relay op). */
-  ensureRelay?: () => Promise<BrowserNativeRelayEnsureStatus>;
+  ensureRelay: (port: number) => Promise<BrowserNativeRelayEnsureStatus>;
   stateDir?: string;
   platform?: NodeJS.Platform;
 }): Promise<BrowserNativeBootstrapResponse> {
@@ -166,7 +166,7 @@ export async function runBrowserNativeHost(params: {
       }
       if (decoded.request.op === "ensure_relay") {
         try {
-          const relay = params.ensureRelay ? await params.ensureRelay() : "skipped";
+          const relay = await params.ensureRelay(decoded.request.relayPort);
           response = { v: 1, ok: true, nonce: decoded.request.nonce, relay };
         } catch {
           response = { v: 1, ok: false, code: "relay_unavailable" };

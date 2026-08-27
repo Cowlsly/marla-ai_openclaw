@@ -4,10 +4,7 @@ import {
   parseBrowserNativeHostOrigins,
   runBrowserNativeHost,
 } from "./src/browser/extension-native-host.js";
-import {
-  buildBrowserExtensionPairing,
-  firstExtensionRelayPort,
-} from "./src/browser/extension-pairing.js";
+import { buildBrowserExtensionPairing } from "./src/browser/extension-pairing.js";
 import { ensureExtensionRelayDaemonProcess } from "./src/browser/extension-relay-daemon-spawn.js";
 
 function requiredArgument(name: string): string {
@@ -38,9 +35,10 @@ async function main(): Promise<void> {
       }),
     // The daemon entry is built as this entry's sibling, so resolve it from
     // this file's own location rather than a shared chunk path.
-    ensureRelay: async () =>
+    ensureRelay: async (port) =>
       await ensureExtensionRelayDaemonProcess({
-        port: firstExtensionRelayPort(getRuntimeConfig()),
+        port,
+        cfg: getRuntimeConfig(),
         entryPath: fileURLToPath(new URL("./relay-daemon-entry.js", import.meta.url)),
       }),
   });
