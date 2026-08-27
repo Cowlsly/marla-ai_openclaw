@@ -1270,7 +1270,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
 
       for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
         let splitTurnSectionLocal = "";
-        let splitTurnAskContextLocal = "";
         let historySummary = "";
         const producerLosses = new Set<CompactionLoss>();
         try {
@@ -1296,7 +1295,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
             splitTurnSectionLocal = formatGeneratedSplitTurnSection(prefixSummary, () => {
               producerLosses.add("split-turn-tail");
             });
-            splitTurnAskContextLocal = formatRequiredAskContext(prefixSummary);
           }
         } catch (attemptError) {
           if (signal?.aborted) {
@@ -1334,8 +1332,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
             ? {
                 identifiers,
                 latestAsk: latestUserAsk,
-                requiredAskContext:
-                  splitTurnAskContextLocal || formatRequiredAskContext(latestUserAsk ?? ""),
+                requiredAskContext: formatRequiredAskContext(latestUserAsk ?? ""),
                 identifierPolicy,
               }
             : undefined,

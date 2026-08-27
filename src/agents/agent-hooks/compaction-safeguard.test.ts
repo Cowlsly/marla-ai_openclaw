@@ -2531,9 +2531,9 @@ describe("compaction-safeguard recent-turn preservation", () => {
     );
   });
 
-  it("reserves split-turn ask evidence and identifiers before optional split context", async () => {
+  it("restores source ask evidence omitted by the split-turn summary", async () => {
     mockSummarizeInStages.mockReset();
-    const latestAsk = "preserve the deployment status";
+    const latestAsk = "confirm whether the aurora migration completed successfully";
     const identifier = "/tmp/split-turn-retention.log";
     const historySummary = [
       "## Decisions",
@@ -2547,7 +2547,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
       "## Exact identifiers",
       "None.",
     ].join("\n");
-    const splitSummary = `${latestAsk} ${identifier} ${"z".repeat(MAX_COMPACTION_SUMMARY_CHARS)}`;
+    const splitSummary = `Unrelated active-turn context. ${identifier} ${"z".repeat(MAX_COMPACTION_SUMMARY_CHARS)}`;
     mockSummarizeInStages
       .mockResolvedValueOnce(summaryResult(historySummary))
       .mockResolvedValueOnce(summaryResult(splitSummary));
@@ -2557,7 +2557,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
       model: createAnthropicModelFixture(),
       recentTurnsPreserve: 0,
       qualityGuardEnabled: true,
-      qualityGuardMaxRetries: 1,
+      qualityGuardMaxRetries: 0,
     });
     const event = {
       preparation: {
@@ -2581,6 +2581,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
 
     const summary = expectCompactionResult(result).summary;
     expect(summary.length).toBeLessThanOrEqual(MAX_COMPACTION_SUMMARY_CHARS);
+    expect(summary).toContain(latestAsk);
     expect(summary).toContain(identifier);
     expect(auditSummaryQuality({ summary, identifiers: [identifier], latestAsk }).ok).toBe(true);
     expect(mockSummarizeInStages).toHaveBeenCalledTimes(2);
