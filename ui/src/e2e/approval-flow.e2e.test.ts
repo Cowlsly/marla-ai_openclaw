@@ -16,6 +16,7 @@ let page: Page | undefined;
 const activeSessionKey = "agent:main:main";
 const captureUiProof = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1";
 const proofDir = path.join(process.cwd(), ".artifacts", "control-ui-e2e", "approval-flow");
+const mobileViewport = { height: 667, width: 390 } as const;
 
 function approval(id: string, command: string, createdAtMs: number, sessionKey = activeSessionKey) {
   return {
@@ -141,6 +142,96 @@ suite.define(() => {
     if (captureUiProof) {
       await currentPage.screenshot({ path: path.join(proofDir, "02-open-queue.png") });
     }
+  });
+
+  it("keeps every modal decision visible on a short mobile viewport", async () => {
+    if (captureUiProof) {
+      await mkdir(proofDir, { recursive: true });
+    }
+    const context = await suite.browser.newContext({
+      colorScheme: "dark",
+      hasTouch: true,
+      isMobile: true,
+      reducedMotion: "reduce",
+      viewport: mobileViewport,
+    });
+    const currentPage = await context.newPage();
+    page = currentPage;
+    const gateway = await installMockGateway(currentPage, { sessionKey: activeSessionKey });
+    const command = Array.from(
+      { length: 12 },
+      (_value, index) => `step-${index + 1}: pnpm test ui/src/e2e/approval-flow.e2e.test.ts`,
+    ).join("\n");
+
+    await currentPage.goto(new URL("settings/devices", suite.server?.baseUrl ?? "").href);
+    await gateway.waitForRequest("sessions.list");
+    await gateway.emitGatewayEvent("exec.approval.requested", {
+      ...approval("approval-mobile", command, 1_000),
+      request: {
+        agentId: "main",
+        allowedDecisions: ["allow-once", "deny"],
+        ask: "always",
+        command,
+        cwd: "/workspace/openclaw",
+        host: "gateway",
+        sessionKey: activeSessionKey,
+      },
+    });
+    for (let index = 2; index <= 23; index += 1) {
+      await gateway.emitGatewayEvent(
+        "exec.approval.requested",
+        approval(`approval-mobile-${index}`, `echo queued-${index}`, index * 1_000),
+      );
+    }
+    await approvalInboxButton(currentPage).waitFor();
+    await currentPage.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("openclaw:approvals-open"));
+    });
+
+    const modal = currentPage.locator("openclaw-modal-dialog .exec-approval-card--modal");
+    await modal.waitFor();
+    await currentPage.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
+    const denyButton = modal.getByRole("button", { name: "Deny" });
+    const denyBefore = await denyButton.boundingBox();
+    if (!denyBefore) {
+      throw new Error("Approval modal actions are missing layout bounds");
+    }
+    await modal.evaluate((card) => {
+      const modalRoot = card.closest("openclaw-modal-dialog");
+      const lastQueuedApproval = modalRoot?.querySelector<HTMLElement>(
+        ".exec-approval-list__item:last-child",
+      );
+      for (let element = lastQueuedApproval?.parentElement; element && element !== modalRoot;) {
+        const next = element.parentElement;
+        const overflowY = getComputedStyle(element).overflowY;
+        if (/auto|scroll/.test(overflowY) && element.scrollHeight > element.clientHeight) {
+          element.scrollTop = element.scrollHeight;
+          break;
+        }
+        element = next;
+      }
+    });
+    await currentPage.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => resolve());
+        }),
+    );
+    if (captureUiProof) {
+      await currentPage.screenshot({ path: path.join(proofDir, "mobile-modal-actions.png") });
+    }
+    const denyAfter = await denyButton.boundingBox();
+    if (!denyAfter) {
+      throw new Error("Approval modal deny action disappeared after scrolling");
+    }
+    expect(denyAfter.y).toBeCloseTo(denyBefore.y, 0);
+    expect(denyAfter.y + denyAfter.height).toBeLessThanOrEqual(mobileViewport.height);
+    expect(denyAfter.height).toBeGreaterThanOrEqual(44);
   });
 
   it("keeps no-auth inline and Inbox approvals readable while blocking decisions", async () => {
