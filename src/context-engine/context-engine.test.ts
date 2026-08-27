@@ -32,6 +32,7 @@ import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.j
 import {
   buildMemorySystemPromptAddition,
   delegateCompactionToRuntime,
+  isRuntimeCompactionDelegate,
   prepareMemorySystemPromptAddition,
 } from "./delegate.js";
 import { LegacyContextEngine } from "./legacy.js";
@@ -713,6 +714,13 @@ describe("Default engine selection", () => {
   it("resolveContextEngine() with no config returns the default ('legacy') engine", async () => {
     const engine = await resolveContextEngine();
     expect(engine.info.id).toBe("legacy");
+  });
+
+  it("preserves native compaction watchdog ownership through default resolution", async () => {
+    const engine = await resolveContextEngine();
+
+    // oxlint-disable-next-line typescript/unbound-method -- the identity predicate never invokes compact.
+    expect(isRuntimeCompactionDelegate(engine.compact)).toBe(true);
   });
 
   it("resolveContextEngine() with config contextEngine='legacy' returns legacy engine", async () => {

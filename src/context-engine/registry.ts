@@ -12,6 +12,7 @@ import type { PluginRegistry } from "../plugins/registry-types.js";
 import { getActivePluginRegistry, requireActivePluginRegistry } from "../plugins/runtime.js";
 import { defaultSlotIdForKey } from "../plugins/slots.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { inheritRuntimeCompactionDelegate } from "./compaction-watchdog.js";
 import {
   clearPersistedContextEngineQuarantineForProcess,
   listPersistedContextEngineQuarantines,
@@ -40,6 +41,7 @@ type RegisterContextEngineForOwnerOptions = {
 };
 
 type GuardedContextEngineMethodName = Exclude<keyof ContextEngine, "info" | "dispose">;
+type GuardedContextEngineMethod = (...args: never[]) => unknown;
 const GUARDED_CONTEXT_ENGINE_METHODS = new Set<PropertyKey>(
   "bootstrap maintain ingest ingestBatch afterTurn commitTurn assemble compact prepareSubagentSpawn onSubagentEnded".split(
     " ",
@@ -54,6 +56,22 @@ type ResolvedContextEngineMetadata = {
 };
 
 const resolvedEngineMetadata = new WeakMap<ContextEngine, ResolvedContextEngineMetadata>();
+
+function inheritCompactionWatchdogOwnership(
+  property: PropertyKey,
+  source: GuardedContextEngineMethod,
+  wrapped: GuardedContextEngineMethod,
+): GuardedContextEngineMethod {
+  if (property !== "compact") {
+    return wrapped;
+  }
+  // SAFETY: the compact property narrows both functions to the ContextEngine compact contract.
+  const compact = source as ContextEngine["compact"];
+  // SAFETY: guarded compact wrappers preserve the source method's single-parameter contract.
+  const wrappedCompact = wrapped as ContextEngine["compact"];
+  return inheritRuntimeCompactionDelegate(compact, wrappedCompact);
+}
+
 function projectContextEngineHostParams(
   engine: ContextEngine,
   params: Record<string, unknown>,
@@ -87,8 +105,9 @@ function wrapContextEngineHostParamProjection(
         if (!GUARDED_CONTEXT_ENGINE_METHODS.has(property)) {
           return method.bind(engine);
         }
-        return (params: Record<string, unknown>) =>
+        const invoke = (params: Record<string, unknown>) =>
           method.call(engine, projectContextEngineHostParams(engine, params));
+        return inheritCompactionWatchdogOwnership(property, method, invoke);
       },
     },
   );
@@ -149,12 +168,13 @@ function wrapResolvedContextEngine(
           return method.bind(engine);
         }
         if (!fallback || !getFallbackEngine) {
-          return (params: Record<string, unknown>) =>
+          const invoke = (params: Record<string, unknown>) =>
             method.call(engine, projectContextEngineHostParams(engine, params));
+          return inheritCompactionWatchdogOwnership(property, method, invoke);
         }
 
         const methodName = property as GuardedContextEngineMethodName;
-        return async (methodParams: Record<string, unknown>) => {
+        const invoke = async (methodParams: Record<string, unknown>) => {
           const abortSignal = contextEngineAbortSignal(methodParams);
           if (abortSignal?.aborted) {
             const reason = abortSignal.reason;
@@ -195,6 +215,7 @@ function wrapResolvedContextEngine(
             });
           }
         };
+        return inheritCompactionWatchdogOwnership(property, method, invoke);
       },
     },
   );

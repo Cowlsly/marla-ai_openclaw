@@ -656,7 +656,6 @@ describe("compaction-safeguard summary budgets", () => {
         auditSummary,
         identifiers: [identifier],
         latestAsk,
-        latestAskCompleted: false,
         requiredAskContext: latestAsk,
         identifierPolicy: "strict",
       }),
@@ -695,7 +694,6 @@ describe("compaction-safeguard summary budgets", () => {
         auditSummary: body,
         identifiers: [identifier],
         latestAsk,
-        latestAskCompleted: false,
         requiredAskContext: latestAsk,
         identifierPolicy: "strict",
       }),
@@ -705,15 +703,16 @@ describe("compaction-safeguard summary budgets", () => {
     }
 
     expect(finalized.summary.length).toBeLessThanOrEqual(MAX_COMPACTION_SUMMARY_CHARS);
+    expect(finalized.structuralSummary).toContain(latestAsk);
     expect(finalized.structuralSummary).toContain(
-      `## Pending user asks\nContinue the active work.\n${latestAsk}`,
+      "## Pending user asks\nContinue the active work.",
     );
     expect(
       auditSummaryQuality({ summary: finalized.summary, identifiers: [identifier], latestAsk }).ok,
     ).toBe(true);
   });
 
-  it("retains a completed latest ask outside the pending section", () => {
+  it("retains the latest ask in the section selected by the summarizer", () => {
     const latestAsk = "combine the bars into one box per provider";
     const body = [
       "## Decisions",
@@ -733,7 +732,6 @@ describe("compaction-safeguard summary budgets", () => {
         auditSummary: body,
         identifiers: [],
         latestAsk,
-        latestAskCompleted: true,
         requiredAskContext: latestAsk,
         identifierPolicy: "strict",
       }),
@@ -742,14 +740,13 @@ describe("compaction-safeguard summary budgets", () => {
       throw new Error("expected finalized summary strings");
     }
 
-    expect(finalized.structuralSummary).toContain(`Latest turn completed:\n${latestAsk}`);
+    expect(finalized.structuralSummary).toContain(latestAsk);
     expect(finalized.structuralSummary).toContain("## Pending user asks\nNone.");
     expect(
       auditSummaryQuality({
         summary: finalized.summary,
         identifiers: [],
         latestAsk,
-        latestAskCompleted: true,
       }),
     ).toEqual({ ok: true, reasons: [] });
   });
@@ -1276,31 +1273,6 @@ describe("compaction-safeguard recent-turn preservation", () => {
       latestAsk: "Explain post-compaction behavior for memory indexing",
     });
     expect(quality.ok).toBe(true);
-  });
-
-  it("rejects a completed latest ask when the summary marks it pending", () => {
-    const latestAsk = "combine the bars into one box per provider";
-    const summary = [
-      "## Decisions",
-      `${latestAsk} is completed.`,
-      "## Open TODOs",
-      "None.",
-      "## Constraints/Rules",
-      "Validate in the browser.",
-      "## Pending user asks",
-      latestAsk,
-      "## Exact identifiers",
-      "None captured.",
-    ].join("\n");
-
-    expect(
-      auditSummaryQuality({
-        summary,
-        identifiers: [],
-        latestAsk,
-        latestAskCompleted: true,
-      }),
-    ).toEqual({ ok: false, reasons: ["completed_latest_user_ask_marked_pending"] });
   });
 
   it("dedupes pure-hex identifiers across case variants", () => {
@@ -2643,12 +2615,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
         serialized.includes(latestAsk) && serialized.includes(completion)
           ? `${latestAsk} is completed.`
           : "No current-turn decision captured.";
-      return summaryResult(
-        structuredSummary(
-          decision,
-          mockSummarizeInStages.mock.calls.length === 1 ? latestAsk : "None.",
-        ),
-      );
+      return summaryResult(structuredSummary(decision));
     });
     const sessionManager = stubSessionManager();
     setCompactionSafeguardRuntime(sessionManager, {
@@ -2698,17 +2665,58 @@ describe("compaction-safeguard recent-turn preservation", () => {
     const finalSummary = expectCompactionResult(result).summary;
     expect(finalSummary).toContain(latestAsk);
     expect(finalSummary).toContain("## Pending user asks\nNone.");
-    expect(mockSummarizeInStages).toHaveBeenCalledTimes(2);
+    expect(mockSummarizeInStages).toHaveBeenCalledTimes(1);
     const call = requireRecord(mockCallArg(mockSummarizeInStages, 0));
     const summarizedMessages = requireArray(call.messages);
     const summarizedRoles = summarizedMessages.map((message) => requireRecord(message).role);
     expect(summarizedRoles).toContain("user");
     expect(JSON.stringify(summarizedMessages)).toContain(completion);
     expect(call.customInstructions).not.toContain(latestAsk);
-    const auditInput = requireRecord(mockCallArg(mockAuditSummaryQuality));
-    expect(auditInput.latestAskCompleted).toBe(true);
-    const retry = requireRecord(mockCallArg(mockSummarizeInStages, 1));
-    expect(retry.customInstructions).toContain("completed_latest_user_ask_marked_pending");
+  });
+
+  it("does not treat a terminal assistant response as proof that the latest task is complete", async () => {
+    mockSummarizeInStages.mockReset();
+    const latestAsk = "fix both compaction failures in the same pull request";
+    const summary = [
+      "## Decisions",
+      "The root causes are confirmed.",
+      "## Open TODOs",
+      "Implement and validate both repairs.",
+      "## Constraints/Rules",
+      "Keep both fixes in the existing pull request.",
+      "## Pending user asks",
+      latestAsk,
+      "## Exact identifiers",
+      "None captured.",
+    ].join("\n");
+    mockSummarizeInStages.mockResolvedValue(summaryResult(summary));
+
+    const sessionManager = stubSessionManager();
+    setCompactionSafeguardRuntime(sessionManager, {
+      model: createAnthropicModelFixture(),
+      recentTurnsPreserve: 0,
+      qualityGuardEnabled: true,
+      qualityGuardMaxRetries: 0,
+    });
+    const event = createCompactionEvent({ messageText: latestAsk, tokensBefore: 90_000 });
+    event.preparation.messagesToSummarize = [
+      { role: "user", content: latestAsk, timestamp: 1 },
+      castAgentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "The RCA is complete; implementation is next." }],
+        stopReason: "stop",
+        timestamp: 2,
+      }),
+    ];
+    (event.preparation as { settings?: { reserveTokens: number } }).settings = {
+      reserveTokens: 4_000,
+    };
+    (event.preparation as { isSplitTurn?: boolean }).isSplitTurn = false;
+
+    const { result } = await runCompactionScenario({ sessionManager, event, apiKey: "test-key" });
+
+    expect(expectCompactionResult(result).summary).toContain(`## Pending user asks\n${latestAsk}`);
+    expect(mockSummarizeInStages).toHaveBeenCalledTimes(1);
   });
 
   it("propagates caller abort during corrective generation", async () => {
@@ -2751,7 +2759,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
     expect(consumeCompactionSafeguardCancelReason(sessionManager)).toBeNull();
   });
 
-  it("retries a split-turn summary that revives a completed request", async () => {
+  it("keeps the split-turn summary's model-classified pending state", async () => {
     mockSummarizeInStages.mockReset();
     const latestAsk = "combine the provider boxes into one completed artifact";
     const identifier = "/tmp/pr130620/live/marker";
@@ -2768,9 +2776,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
         "## Exact identifiers",
         identifier,
       ].join("\n");
-    mockSummarizeInStages
-      .mockResolvedValueOnce(summaryResult(structuredSummary(latestAsk)))
-      .mockResolvedValueOnce(summaryResult(structuredSummary("None.")));
+    mockSummarizeInStages.mockResolvedValue(summaryResult(structuredSummary(latestAsk)));
 
     const sessionManager = stubSessionManager();
     setCompactionSafeguardRuntime(sessionManager, {
@@ -2784,7 +2790,6 @@ describe("compaction-safeguard recent-turn preservation", () => {
         turnPrefixMessages: [
           { role: "user", content: `${latestAsk} and preserve ${identifier}`, timestamp: 1 },
         ] as AgentMessage[],
-        splitTurnCompleted: true,
         firstKeptEntryId: "entry-1",
         tokensBefore: 90_000,
         fileOps: { read: [], edited: [], written: [] },
@@ -2798,11 +2803,8 @@ describe("compaction-safeguard recent-turn preservation", () => {
     const { result } = await runCompactionScenario({ sessionManager, event, apiKey: "test-key" });
 
     const finalSummary = expectCompactionResult(result).summary;
-    expect(mockSummarizeInStages).toHaveBeenCalledTimes(2);
-    expect(finalSummary).not.toContain(`## Pending user asks\n${latestAsk}`);
-    expect(finalSummary).toContain("## Pending user asks\nNone.");
-    const retry = requireRecord(mockCallArg(mockSummarizeInStages, 1));
-    expect(retry.customInstructions).toContain("completed_latest_user_ask_marked_pending");
+    expect(mockSummarizeInStages).toHaveBeenCalledTimes(1);
+    expect(finalSummary).toContain(`## Pending user asks\n${latestAsk}`);
   });
 
   it("audits all-preserved fallback output against pre-partition source facts", async () => {

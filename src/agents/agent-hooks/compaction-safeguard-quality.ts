@@ -20,7 +20,6 @@ const REQUIRED_SUMMARY_SECTIONS = [
   "## Exact identifiers",
 ] as const;
 const QUALITY_PROTECTED_SECTION_START = 3;
-const PENDING_ASK_SECTION_INDEX = 3;
 const EXACT_IDENTIFIERS_SECTION_INDEX = 4;
 const MAX_PROTECTED_SECTION_CONTENT_SHARE = 0.25;
 const STRICT_EXACT_IDENTIFIERS_INSTRUCTION =
@@ -130,13 +129,6 @@ function parseRequiredSummarySectionContents(summary: string): string[] | null {
   return contents.map((lines) => lines.join("\n").trim());
 }
 
-function parsePendingUserAskSections(summary: string): string[] {
-  return summary
-    .split(/^## Pending user asks[ \t]*$/gmu)
-    .slice(1)
-    .map((section) => section.split(/^##[ \t]+\S.*$/mu, 1)[0]?.trim() ?? "");
-}
-
 /**
  * Plan truncation that keeps the audit facts and lets everything else shrink.
  * Only the headings, the bounded latest-ask context, and the audited source
@@ -152,7 +144,6 @@ export function createSummaryQualityRetentionPlan(
     auditSummary?: string;
     identifiers: string[];
     latestAsk: string | null;
-    latestAskCompleted?: boolean;
     requiredAskContext?: string;
     identifierPolicy?: CompactionSummarizationInstructions["identifierPolicy"];
   },
@@ -171,10 +162,17 @@ export function createSummaryQualityRetentionPlan(
   const marker = truncatedMarker.trim();
   // Protected tails render after each section's optional content so the audit
   // facts survive regardless of how much model text the budget keeps.
-  const protectedAskSectionIndex = params.latestAskCompleted ? 0 : PENDING_ASK_SECTION_INDEX;
-  const protectedAskContext = params.latestAskCompleted
-    ? `Latest turn completed:\n${requiredAskContext}`
-    : requiredAskContext;
+  const modelAskSectionIndex = contents.findIndex((content) =>
+    hasAskOverlap(content, params.latestAsk),
+  );
+  const protectedAskSectionIndex = Math.max(modelAskSectionIndex, 0);
+  // Response termination cannot prove task completion. Preserve the summarizer's
+  // section choice instead of moving the request between completed and pending state.
+  const protectedAskContext = requiredAskContext
+    ? modelAskSectionIndex >= 0
+      ? requiredAskContext
+      : `Latest user request context:\n${requiredAskContext}`
+    : "";
   const protectedTails = REQUIRED_SUMMARY_SECTIONS.map((_, index) =>
     index === protectedAskSectionIndex
       ? protectedAskContext
@@ -195,7 +193,7 @@ export function createSummaryQualityRetentionPlan(
     if (!tail) {
       return optional;
     }
-    if (index === PENDING_ASK_SECTION_INDEX && optional.includes(tail)) {
+    if (index === protectedAskSectionIndex && optional.includes(tail)) {
       return optional;
     }
     if (index === EXACT_IDENTIFIERS_SECTION_INDEX) {
@@ -407,10 +405,8 @@ function hasAskOverlap(summary: string, latestAsk: string | null): boolean {
 export function auditSummaryQuality(params: {
   summary: string;
   structuralSummary: string;
-  completionSummary?: string;
   identifiers: string[];
   latestAsk: string | null;
-  latestAskCompleted?: boolean;
   identifierPolicy?: CompactionSummarizationInstructions["identifierPolicy"];
 }): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
@@ -431,14 +427,6 @@ export function auditSummaryQuality(params: {
   }
   if (!hasAskOverlap(params.summary, params.latestAsk)) {
     reasons.push("latest_user_ask_not_reflected");
-  }
-  if (params.latestAskCompleted) {
-    const pendingAskSections = parsePendingUserAskSections(
-      params.completionSummary ?? params.structuralSummary,
-    );
-    if (pendingAskSections.some((pendingAsks) => hasAskOverlap(pendingAsks, params.latestAsk))) {
-      reasons.push("completed_latest_user_ask_marked_pending");
-    }
   }
   return { ok: reasons.length === 0, reasons };
 }
