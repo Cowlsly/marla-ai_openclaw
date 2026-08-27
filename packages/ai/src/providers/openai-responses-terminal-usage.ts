@@ -58,7 +58,8 @@ export function mapResponsesTerminalUsage(
   const reportedTotal = readReportedCount(usage.total_tokens);
   const hasCoherentContext =
     reportedInput !== undefined &&
-    (reportedOutput !== undefined || reportedTotal !== undefined) &&
+    (reportedOutput !== undefined ||
+      (reportedTotal !== undefined && reportedTotal >= reportedInput)) &&
     cacheRead + cacheWrite <= reportedInput;
   return {
     input,

@@ -58,6 +58,18 @@ describe("mapResponsesTerminalUsage", () => {
       totalTokens: 9,
     });
   });
+
+  it.each([0, 29])("rejects an output-absent context snapshot whose total is %i", (totalTokens) => {
+    expect(
+      mapResponsesTerminalUsage({ input_tokens: 30, total_tokens: totalTokens })?.contextUsage,
+    ).toEqual({ state: "unavailable" });
+  });
+
+  it("accepts an output-absent context snapshot whose total covers its input", () => {
+    expect(mapResponsesTerminalUsage({ input_tokens: 30, total_tokens: 30 })?.contextUsage).toEqual(
+      { state: "available", promptTokens: 30, totalTokens: 30 },
+    );
+  });
 });
 
 describe("readResponsesReasoningTokens", () => {
