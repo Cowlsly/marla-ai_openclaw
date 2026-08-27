@@ -9,6 +9,7 @@ import {
 } from "./attempt-diagnostics.js";
 import { isCodexAppServerIndeterminateRequestCancellationError } from "./client.js";
 import { resolveCodexExplicitSkillInputs } from "./explicit-skill-input.js";
+import { buildCodexPluginAppsConfigPatchFromPolicyContext } from "./plugin-thread-config.js";
 import { assertCodexTurnStartResponse } from "./protocol-validators.js";
 import type { CodexTurnStartResponse } from "./protocol.js";
 import { readCodexRateLimitsRevision } from "./rate-limit-cache.js";
@@ -18,6 +19,7 @@ import {
 } from "./run-attempt-lifecycle.js";
 import type { CodexAttemptResources } from "./run-attempt-resources.js";
 import type { CodexAttemptTurnState } from "./run-attempt-turn-state.js";
+import { resolveCodexThreadApprovalsReviewer } from "./thread-approval-reviewer.js";
 import { buildTurnStartParams } from "./thread-lifecycle.js";
 import { buildCodexUserPromptMessage } from "./transcript-mirror.js";
 
@@ -107,10 +109,16 @@ export async function prepareCodexAttemptTurnRequest(
       runtimeParams,
     );
     connection.mutable.pluginAppServer = turnAppServer;
+    const pluginAppsConfigPatch = resourceState.thread.pluginAppPolicyContext
+      ? buildCodexPluginAppsConfigPatchFromPolicyContext(
+          resourceState.thread.pluginAppPolicyContext,
+        )
+      : undefined;
     const turnStartParams = buildTurnStartParams(runtimeParams, {
       threadId: resourceState.thread.threadId,
       cwd: resourceState.codexExecutionCwd,
       appServer: turnAppServer,
+      approvalsReviewer: resolveCodexThreadApprovalsReviewer(turnAppServer, pluginAppsConfigPatch),
       promptText: turnState.codexTurnPromptText,
       explicitSkillInputs,
       sandboxPolicy: resourceState.codexSandboxPolicy,

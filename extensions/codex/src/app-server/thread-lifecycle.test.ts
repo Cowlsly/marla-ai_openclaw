@@ -1745,6 +1745,20 @@ describe("Codex app-server native code mode config", () => {
     expect(request.approvalsReviewer).toBe("auto_review");
   });
 
+  it("honors an explicit reviewer on turn start", () => {
+    const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
+      threadId: "thread-1",
+      cwd: "/repo",
+      appServer: {
+        ...createAppServerOptions(),
+        approvalsReviewer: "auto_review",
+      } as never,
+      approvalsReviewer: "user",
+    });
+
+    expect(request.approvalsReviewer).toBe("user");
+  });
+
   it("preserves omitted native tiers until a previously owned sticky tier must be cleared", () => {
     const options = {
       threadId: "thread-1",

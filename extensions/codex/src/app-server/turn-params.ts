@@ -56,6 +56,7 @@ export function buildTurnStartParams(
     threadId: string;
     cwd: string;
     appServer: CodexAppServerRuntimeOptions;
+    approvalsReviewer?: CodexAppServerRuntimeOptions["approvalsReviewer"];
     promptText?: string;
     explicitSkillInputs?: Array<Extract<CodexUserInput, { type: "skill" }>>;
     sandboxPolicy?: CodexSandboxPolicy;
@@ -101,7 +102,7 @@ export function buildTurnStartParams(
       ? { runtimeWorkspaceRoots: [options.appServer.sessionRoot] }
       : {}),
     approvalPolicy: options.appServer.approvalPolicy,
-    approvalsReviewer: options.appServer.approvalsReviewer,
+    approvalsReviewer: options.approvalsReviewer ?? options.appServer.approvalsReviewer,
     ...(useThreadPermissionProfile
       ? {}
       : {

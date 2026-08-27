@@ -5607,6 +5607,52 @@ describe("runCodexAppServerAttempt", () => {
     await elicitation.notify(turnCompleted({ id: "turn-1", status: "completed" }));
     await run;
   });
+
+  it("keeps an ask-mode app on the user reviewer for turn/start", async () => {
+    const { sessionFile, workspaceDir, agentDir } = createRunPaths();
+    const pluginConfig = {
+      appServer: { mode: "guardian" },
+      codexPlugins: {
+        enabled: true,
+        plugins: {
+          "google-calendar": {
+            marketplaceName: "openai-curated",
+            pluginName: "google-calendar",
+            allow_destructive_actions: "ask",
+          },
+        },
+      },
+    } as const;
+    const appServer = resolveCodexAppServerRuntimeOptions({
+      pluginConfig: readCodexPluginConfig(pluginConfig),
+    });
+    expect(appServer.approvalsReviewer).toBe("auto_review");
+    await primeGoogleCalendarAppInventory(
+      buildCodexPluginAppCacheKey({
+        appServer,
+        agentDir,
+        envApiKeyFingerprint: resolveCodexAppServerFallbackApiKeyCacheKey({
+          startOptions: appServer.start,
+        }),
+        runtimeIdentity: getMockRuntimeIdentity(),
+      }),
+      true,
+    );
+    const { requests, waitForMethod, completeTurn } = createStartedThreadHarness(
+      createGoogleCalendarRequest(),
+    );
+    const params = createParams(sessionFile, workspaceDir);
+    params.agentDir = agentDir;
+
+    const run = runCodexAppServerAttempt(params, { pluginConfig });
+    await completeStartedRun(run, waitForMethod, completeTurn);
+
+    const threadStart = requests.find((entry) => entry.method === "thread/start");
+    const turnStart = requests.find((entry) => entry.method === "turn/start");
+    expect(threadStart?.params).toMatchObject({ approvalsReviewer: "user" });
+    expect(turnStart?.params).toMatchObject({ approvalsReviewer: "user" });
+  });
+
   it.each([
     {
       name: "keys plugin app inventory by the resolved Codex account",
