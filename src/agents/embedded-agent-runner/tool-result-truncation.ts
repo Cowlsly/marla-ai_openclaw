@@ -1276,6 +1276,26 @@ function truncateOversizedToolResultsInExistingSessionManager(params: {
     return { truncated: false, truncatedCount: 0, reason: "empty session" };
   }
 
+  if (params.projectionState) {
+    const messages = sessionManager.buildSessionContext().messages;
+    const projected = truncateOversizedToolResultsInMessages(
+      messages,
+      contextWindowTokens,
+      params.maxCharsOverride,
+      params.aggregateMaxCharsOverride,
+      params.projectionState,
+    );
+    const truncatedCount = projected.messages.reduce(
+      (count, message, index) => count + (message === messages[index] ? 0 : 1),
+      0,
+    );
+    return {
+      truncated: truncatedCount > 0,
+      truncatedCount,
+      ...(truncatedCount === 0 ? { reason: "no oversized or aggregate tool results" } : {}),
+    };
+  }
+
   const { maxChars, aggregateBudgetChars, plan } = buildRecoveryToolResultReplacementPlan({
     branch,
     contextWindowTokens,
