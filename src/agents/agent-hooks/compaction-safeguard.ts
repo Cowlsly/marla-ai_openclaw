@@ -216,7 +216,6 @@ type CompactionSuffix = {
 };
 
 type SummaryQualityRetention = {
-  auditSummary: string;
   identifiers: string[];
   latestAsk: string | null;
   requiredAskContext: string;
@@ -1333,7 +1332,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           producerLosses,
           qualityGuardEnabled
             ? {
-                auditSummary: unbudgetedSummary,
                 identifiers,
                 latestAsk: latestUserAsk,
                 requiredAskContext:
