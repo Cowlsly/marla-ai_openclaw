@@ -932,6 +932,96 @@ describe("inline approval card", () => {
 });
 
 describe("chat run error", () => {
+  it("keeps Check delivery reachable when exact history deduplicates the retained bubble", () => {
+    vi.mocked(chatThread.buildCachedChatItems).mockRestore();
+    vi.mocked(chatMessage.renderMessageGroup).mockRestore();
+    const onRetrySessionPlacementStartup = vi.fn();
+    const container = renderChatView({
+      canSend: false,
+      messages: [
+        {
+          role: "user",
+          content: "original prompt",
+          __openclaw: { idempotencyKey: "initial:user" },
+        },
+      ],
+      placementStartup: {
+        sessionKey: "main",
+        phase: "failed",
+        startedAt: 1,
+        retryable: true,
+        action: "check-delivery",
+        initialTurn: {
+          id: "initial",
+          sendRunId: "initial",
+          text: "original prompt",
+          createdAt: 1,
+          sendAttempts: 1,
+          sendState: "unconfirmed",
+        },
+      },
+      onRetrySessionPlacementStartup,
+    });
+    expect(container.querySelectorAll(".chat-group.user")).toHaveLength(1);
+    expect(container.querySelector(".chat-send-status__retry")).toBeNull();
+    const action = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".chat-error button"),
+    ).find((button) => button.textContent?.trim() === "Check delivery");
+    expect(action).toBeDefined();
+    action?.click();
+    expect(onRetrySessionPlacementStartup).toHaveBeenCalledOnce();
+  });
+
+  it.each(["retry", "check-delivery"] as const)(
+    "keeps the retained initial turn's %s action usable while ordinary sending is held",
+    (action) => {
+      vi.mocked(chatThread.buildCachedChatItems).mockRestore();
+      vi.mocked(chatMessage.renderMessageGroup).mockRestore();
+      const onRetrySessionPlacementStartup = vi.fn();
+      const onQueueRetry = vi.fn();
+      const container = renderChatView({
+        canSend: false,
+        queue: [
+          {
+            id: "ordinary",
+            text: "later draft",
+            createdAt: 2,
+            sendAttempts: 1,
+            sendState: "failed",
+          },
+        ],
+        placementStartup: {
+          sessionKey: "agent:main:startup",
+          phase: "failed",
+          startedAt: 1,
+          retryable: true,
+          action,
+          error: "Retained initial turn",
+          initialTurn: {
+            id: "initial",
+            text: "original prompt",
+            createdAt: 1,
+            sendAttempts: 1,
+            sendState: action === "retry" ? "failed" : "unconfirmed",
+          },
+        },
+        onRetrySessionPlacementStartup,
+        onQueueRetry,
+      });
+      expect(container.querySelector(".chat-thread")?.textContent).toContain("original prompt");
+      expect(container.querySelector(".chat-thread")?.textContent).toContain("later draft");
+      const buttons = container.querySelectorAll<HTMLButtonElement>(".chat-send-status__retry");
+      expect(buttons).toHaveLength(1);
+      expect(buttons[0]?.textContent?.trim()).toBe(action === "retry" ? "Retry" : "Check delivery");
+      buttons[0]?.click();
+      expect(onRetrySessionPlacementStartup).toHaveBeenCalledOnce();
+      expect(onQueueRetry).not.toHaveBeenCalled();
+      expect(container.querySelector(".chat-error")?.textContent).toContain(
+        action === "retry" ? "Retained initial turn" : "without resending it or starting a worker",
+      );
+    },
+  );
+
   it.each(["run", "request"])(
     "exposes the complete %s error as selectable text and a copy action",
     (source) => {
@@ -1655,6 +1745,110 @@ describe("chat transcript rendering", () => {
     ]);
     expect(container.querySelector(".chat-transcript-announcement")?.textContent).toBe(
       "New answer",
+    );
+  });
+
+  it("announces named attachment failures in ordinary and completed-run assistant rows", () => {
+    const transcript = createTestTranscript();
+    const container = document.createElement("div");
+    const existing = {
+      testVirtualRow: true,
+      testVirtualKey: "assistant-existing",
+      testVirtualRole: "assistant",
+      role: "assistant",
+      content: "Existing answer",
+    };
+    const renderMessages = (messages: unknown[]) =>
+      renderChatInto(container, { transcript, messages });
+
+    renderMessages([existing]);
+    const attachmentOnly = {
+      testVirtualRow: true,
+      testVirtualKey: "assistant-missing-attachment",
+      testVirtualRole: "assistant",
+      role: "assistant",
+      content: [
+        {
+          type: "attachment_error",
+          attachment: { code: "file-not-found", kind: "document", label: "missing.pdf" },
+        },
+      ],
+    };
+    renderMessages([existing, attachmentOnly]);
+    expect(container.querySelector(".chat-transcript-announcement")?.textContent).toBe(
+      "missing.pdf: Not sent. File not found. Check the path and try again.",
+    );
+
+    const mixed = {
+      testVirtualRow: true,
+      testVirtualKey: "assistant-mixed-attachments",
+      testVirtualRole: "assistant",
+      role: "assistant",
+      content: [
+        { type: "text", text: "Partial result" },
+        {
+          type: "attachment_error",
+          attachment: {
+            code: "unsupported-format",
+            kind: "document",
+            label: "settings.toml",
+          },
+        },
+      ],
+    };
+    renderMessages([existing, attachmentOnly, mixed]);
+    expect(container.querySelector(".chat-transcript-announcement")?.textContent).toBe(
+      "Partial result settings.toml: Not sent. Rejected by the local attachment allowlist. Send a supported file type.",
+    );
+
+    const runBoundary = {
+      kind: "group" as const,
+      key: "group:user:attachment-run",
+      role: "user" as const,
+      messages: [
+        {
+          key: "user:attachment-run",
+          message: {
+            role: "user",
+            content: "Send the attachment",
+            __openclaw: {
+              id: "user:attachment-run",
+              idempotencyKey: "attachment-run:user",
+            },
+          },
+        },
+      ],
+      timestamp: 1,
+      isStreaming: false,
+    };
+    const completedFailure = {
+      kind: "group" as const,
+      key: "group:assistant:attachment-run",
+      role: "assistant" as const,
+      messages: [
+        {
+          key: "assistant:attachment-run",
+          message: {
+            role: "assistant",
+            content: attachmentOnly.content,
+            runId: "attachment-run",
+          },
+        },
+      ],
+      timestamp: 2,
+      isStreaming: false,
+      runId: "attachment-run",
+    };
+    vi.mocked(chatThread.buildCachedChatItems).mockReturnValue([
+      runBoundary,
+      completedFailure,
+    ] as ReturnType<typeof chatThread.buildCachedChatItems>);
+    renderChatInto(container, {
+      transcript,
+      messages: [runBoundary, completedFailure],
+    });
+    expect(container.querySelector(".chat-transcript-announcement")?.textContent).toBe(
+      "missing.pdf: Not sent. File not found. Check the path and try again.",
     );
   });
 

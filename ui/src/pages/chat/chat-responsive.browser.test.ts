@@ -54,6 +54,7 @@ const SHARED_APP_CONTEXT_TEXT = "Context hover regression fixture.";
 const SHARED_APP_SLASH_TEXT = "Short landscape slash command keyboard regression fixture.";
 const SHARED_APP_IMAGE_URL = "https://cdn.example/render%2Epng?download=1";
 const SHARED_APP_VIDEO_URL = "https://cdn.example/clip%252Emp4?download=1";
+const SHARED_APP_ATTACHMENT_OUTCOME_TEXT = "Mixed attachment outcome fixture.";
 
 function installResponsiveChatGateway(page: Page, scenario: ControlUiMockGatewayScenario = {}) {
   return installMockGateway(page, {
@@ -102,6 +103,41 @@ async function createSharedAppPage(): Promise<Page> {
           content: [{ text: SHARED_APP_SLASH_TEXT, type: "text" }],
           role: "assistant",
           timestamp: Date.UTC(2026, 6, 9, 10, 2),
+        },
+        {
+          content: [
+            { text: SHARED_APP_ATTACHMENT_OUTCOME_TEXT, type: "text" },
+            {
+              type: "attachment",
+              attachment: {
+                url: "https://files.example/deploy.yaml",
+                kind: "document",
+                label: "deploy.yaml",
+                mimeType: "application/yaml",
+              },
+            },
+            ...["settings.toml", "schema.sql", "events.ndjson", "font.ttf", "font.woff2"].map(
+              (label) => ({
+                type: "attachment_error",
+                attachment: {
+                  code: "unsupported-format",
+                  kind: "document",
+                  label,
+                },
+              }),
+            ),
+            {
+              type: "attachment_error",
+              attachment: {
+                code: "delivery-failed",
+                kind: "document",
+                label: "bundle.7z",
+                mimeType: "application/x-7z-compressed",
+              },
+            },
+          ],
+          role: "assistant",
+          timestamp: Date.UTC(2026, 6, 9, 10, 3),
         },
       ],
     });
@@ -1846,7 +1882,9 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
                 </div>
               </section>
             </main>
-            <openclaw-toast-host><div class="app-toast">Connection notice</div></openclaw-toast-host>
+            <openclaw-toast-host data-toast-placement="shell">
+              <div class="app-toast">Connection notice</div>
+            </openclaw-toast-host>
           </div>
         </body></html>`);
         // The card entrance animation moves every measured descendant together.
@@ -2239,6 +2277,190 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
     }
   });
 
+  it("keeps managed image actions anchored around tiny rendered images", async () => {
+    const page = await openBrowserPage(1280, 900);
+    try {
+      await page.setContent(
+        `<!doctype html><html><head><style>${readUiCss()}</style></head><body>
+          <div class="chat-message-images">
+            <span class="chat-image-frame chat-image-frame--managed">
+            <button class="chat-message-image-button" type="button">
+              <img
+                class="chat-message-image chat-message-image--small"
+                width="16"
+                height="16"
+                alt="Tiny generated image"
+                src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Crect width='16' height='16' fill='%23dc4f92'/%3E%3C/svg%3E"
+              />
+            </button>
+            <span class="chat-image-actions">
+              <button class="chat-image-action" type="button">1</button>
+              <button class="chat-image-action" type="button">2</button>
+            </span>
+            </span>
+            <span class="chat-image-frame chat-image-frame--managed">
+            <button class="chat-message-image-button" type="button">
+              <img
+                class="chat-message-image"
+                width="420"
+                height="1800"
+                alt="Tall generated image"
+                src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='420' height='1800'%3E%3Crect width='420' height='1800' fill='%235c86ff'/%3E%3C/svg%3E"
+              />
+            </button>
+            <span class="chat-image-actions">
+              <button class="chat-image-action" type="button">1</button>
+              <button class="chat-image-action" type="button">2</button>
+            </span>
+            </span>
+          </div>
+        </body></html>`,
+      );
+      const frames = page.locator(".chat-image-frame--managed");
+      await expect.poll(() => frames.count()).toBe(2);
+      const frameRows = await frames.evaluateAll((elements) =>
+        elements.map((element) => {
+          const box = element.getBoundingClientRect();
+          return { bottom: box.bottom, top: box.top };
+        }),
+      );
+      expect(frameRows[1]!.top).toBeGreaterThan(frameRows[0]!.bottom);
+      for (const [index, expectedWidth] of [160, 84].entries()) {
+        const frame = frames.nth(index);
+        await frame.hover();
+        await expect
+          .poll(() => frame.evaluate((element) => getComputedStyle(element, "::after").opacity))
+          .toBe("1");
+        const geometry = await frame.evaluate((element) => {
+          const actions = element.querySelector<HTMLElement>(".chat-image-actions")!;
+          const frameRect = element.getBoundingClientRect();
+          const actionsRect = actions.getBoundingClientRect();
+          return {
+            actionsInsideFrame:
+              actionsRect.left >= frameRect.left &&
+              actionsRect.right <= frameRect.right &&
+              actionsRect.top >= frameRect.top &&
+              actionsRect.bottom <= frameRect.bottom,
+            actionsNearBottom: frameRect.bottom - actionsRect.bottom <= 9,
+            fadeWidth: Number.parseFloat(getComputedStyle(element, "::after").width),
+            frameWidth: frameRect.width,
+            overflow: getComputedStyle(element).overflow,
+          };
+        });
+        expect(geometry.actionsInsideFrame).toBe(true);
+        expect(geometry.actionsNearBottom).toBe(true);
+        expect(geometry.fadeWidth).toBeCloseTo(geometry.frameWidth, 0);
+        expect(geometry.frameWidth).toBeCloseTo(expectedWidth, 0);
+        expect(geometry.overflow).toBe("hidden");
+      }
+    } finally {
+      await closeBrowserPage(page);
+    }
+  });
+
+  it("places a five-image sent gallery above its separate text bubble", async () => {
+    const page = await openBrowserPage(1280, 900);
+    try {
+      const tile = (index: number) => `
+        <span class="chat-image-frame" data-tile="${index}">
+          <button class="chat-message-image-button" type="button">
+            <img class="chat-message-image" width="640" height="640" alt="Image ${index}"
+              src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='640'%3E%3Crect width='640' height='640' fill='%23865cff'/%3E%3C/svg%3E" />
+          </button>
+        </span>`;
+      await page.setContent(
+        `<!doctype html><html><head><style>${readUiCss()}</style></head><body>
+          <div class="chat-group user">
+            <div class="chat-bubble chat-bubble--with-images">
+              <div
+                class="chat-message-images chat-message-images--gallery chat-message-images--five"
+              >
+                ${Array.from({ length: 5 }, (_, index) => tile(index + 1)).join("")}
+              </div>
+              <div class="chat-text">oi</div>
+            </div>
+          </div>
+        </body></html>`,
+      );
+      await page.locator(".chat-message-image").first().waitFor();
+      const geometry = await page.locator(".chat-bubble").evaluate((bubble) => {
+        const gallery = bubble.querySelector<HTMLElement>(".chat-message-images")!;
+        const text = bubble.querySelector<HTMLElement>(".chat-text")!;
+        const frames = [...gallery.querySelectorAll<HTMLElement>(".chat-image-frame")];
+        const boxes = frames.map((frame) => frame.getBoundingClientRect());
+        const galleryBox = gallery.getBoundingClientRect();
+        const textBox = text.getBoundingClientRect();
+        return {
+          background: getComputedStyle(bubble).backgroundColor,
+          firstRow: boxes.filter((box) => Math.round(box.top) === Math.round(boxes[0]!.top)).length,
+          fourthAlignedWithSecond: Math.abs(boxes[3]!.left - boxes[1]!.left) <= 1,
+          lastRowRightAligned: Math.abs(boxes[4]!.right - galleryBox.right) <= 1,
+          textBelow: textBox.top >= galleryBox.bottom + 7,
+          textRightAligned: Math.abs(textBox.right - galleryBox.right) <= 1,
+          tileSize: boxes[0]!.width,
+        };
+      });
+      expect(geometry).toMatchObject({
+        background: "rgba(0, 0, 0, 0)",
+        firstRow: 3,
+        fourthAlignedWithSecond: true,
+        lastRowRightAligned: true,
+        textBelow: true,
+        textRightAligned: true,
+      });
+      expect(geometry.tileSize).toBeCloseTo(128, 0);
+    } finally {
+      await closeBrowserPage(page);
+    }
+  });
+
+  it("keeps every sent-image text shape on the user bubble surface", async () => {
+    const page = await openBrowserPage(1280, 900);
+    try {
+      await page.setContent(
+        `<!doctype html><html><head><style>${readUiCss()}</style></head><body>
+          <div class="chat-group user">
+            <div class="chat-bubble chat-bubble--with-images">
+              <div class="chat-text" data-shape="text">Short text</div>
+            </div>
+            <div class="chat-bubble chat-bubble--with-images">
+              <div class="chat-message-disclosure" data-shape="disclosure">
+                <div class="chat-message-disclosure__content">
+                  <div class="chat-text">Collapsed text</div>
+                </div>
+              </div>
+            </div>
+            <div class="chat-bubble chat-bubble--with-images">
+              <details class="chat-json-collapse" data-shape="json">
+                <summary class="chat-json-summary">JSON</summary>
+              </details>
+            </div>
+          </div>
+        </body></html>`,
+      );
+      for (const theme of ["dark", "light"] as const) {
+        await page.evaluate(
+          (mode) => document.documentElement.setAttribute("data-theme-mode", mode),
+          theme,
+        );
+        const surfaces = await page.locator("[data-shape]").evaluateAll((elements) =>
+          elements.map((element) => {
+            const style = getComputedStyle(element);
+            return {
+              backgroundColor: style.backgroundColor,
+              padding: style.padding,
+            };
+          }),
+        );
+        expect(surfaces[0]).toMatchObject({ padding: "10px 14px" });
+        expect(surfaces[1]).toEqual(surfaces[0]);
+        expect(surfaces[2]).toEqual(surfaces[0]);
+      }
+    } finally {
+      await closeBrowserPage(page);
+    }
+  });
+
   it("wraps long question and approval metadata inside narrow cards", async () => {
     const page = await openBrowserPage(320, 568);
     try {
@@ -2540,6 +2762,115 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
         (await videoCard.locator(".chat-assistant-attachment-card__title").textContent())?.trim(),
       ).toBe("clip%2Emp4");
       expect(await videoCard.locator("video").count()).toBe(0);
+    },
+  );
+
+  it(
+    "renders one named card for every success and failure in a mixed attachment batch",
+    FULL_APP_TEST_OPTIONS,
+    async () => {
+      const page = await getSharedAppPage();
+      const bubble = page
+        .locator(".chat-bubble")
+        .filter({ hasText: SHARED_APP_ATTACHMENT_OUTCOME_TEXT });
+      const cards = bubble.locator(".chat-assistant-attachment-card");
+      await expect.poll(() => cards.count()).toBe(7);
+      expect(
+        await cards.locator(".chat-assistant-attachment-card__title").allTextContents(),
+      ).toEqual([
+        "deploy.yaml",
+        "settings.toml",
+        "schema.sql",
+        "events.ndjson",
+        "font.ttf",
+        "font.woff2",
+        "bundle.7z",
+      ]);
+      expect(await bubble.locator(".chat-assistant-attachment-card--compact").count()).toBe(1);
+      expect(await bubble.locator(".chat-assistant-attachment-card--definitive").count()).toBe(6);
+      expect(
+        await bubble
+          .getByText(
+            "Not sent · Rejected by the local attachment allowlist. Send a supported file type.",
+          )
+          .count(),
+      ).toBe(5);
+      expect(
+        await bubble.getByText("Not sent · Delivery failed. Try sending this file again.").count(),
+      ).toBe(1);
+      expect(await bubble.getByText("Media failed").count()).toBe(0);
+
+      try {
+        const desktopStatusSpacing = await cards
+          .filter({ hasText: "settings.toml" })
+          .evaluate((card) => {
+            const badge = card.querySelector<HTMLElement>(
+              ".chat-assistant-attachment-card__status-badge",
+            )!;
+            const reason = card.querySelector<HTMLElement>(
+              ".chat-assistant-attachment-card__status-reason",
+            )!;
+            const separator = card.querySelector<HTMLElement>(
+              ".chat-assistant-attachment-card__status-separator",
+            )!;
+            const badgeRect = badge.getBoundingClientRect();
+            const reasonRect = reason.getBoundingClientRect();
+            const separatorRect = separator.getBoundingClientRect();
+            return {
+              leftGap: separatorRect.left - badgeRect.right,
+              rightGap: reasonRect.left - separatorRect.right,
+            };
+          });
+        expect(desktopStatusSpacing.leftGap).toBeGreaterThan(4);
+        expect(desktopStatusSpacing.rightGap).toBeGreaterThan(4);
+        expect(Math.abs(desktopStatusSpacing.leftGap - desktopStatusSpacing.rightGap)).toBeLessThan(
+          0.25,
+        );
+
+        for (const width of [320, 560]) {
+          await page.setViewportSize({ width, height: 852 });
+          const failedCard = cards.filter({ hasText: "settings.toml" });
+          const mobileStatusLayout = await failedCard.evaluate((card) => {
+            const badge = card.querySelector<HTMLElement>(
+              ".chat-assistant-attachment-card__status-badge",
+            )!;
+            const reason = card.querySelector<HTMLElement>(
+              ".chat-assistant-attachment-card__status-reason",
+            )!;
+            const separator = card.querySelector<HTMLElement>(
+              ".chat-assistant-attachment-card__status-separator",
+            )!;
+            const cardRect = card.getBoundingClientRect();
+            const reasonRect = reason.getBoundingClientRect();
+            return {
+              badgeBottom: badge.getBoundingClientRect().bottom,
+              cardBottom: cardRect.bottom,
+              cardClientWidth: card.clientWidth,
+              cardScrollWidth: card.scrollWidth,
+              reasonBottom: reasonRect.bottom,
+              reasonRight: reasonRect.right,
+              reasonTop: reasonRect.top,
+              separatorDisplay: getComputedStyle(separator).display,
+              reasonWhiteSpace: getComputedStyle(reason).whiteSpace,
+            };
+          });
+          expect(mobileStatusLayout.separatorDisplay).toBe("none");
+          expect(mobileStatusLayout.reasonWhiteSpace).toBe("normal");
+          expect(mobileStatusLayout.reasonTop).toBeGreaterThanOrEqual(
+            mobileStatusLayout.badgeBottom,
+          );
+          expect(mobileStatusLayout.reasonBottom).toBeLessThanOrEqual(
+            mobileStatusLayout.cardBottom,
+          );
+          expect(mobileStatusLayout.reasonRight).toBeLessThanOrEqual(width);
+          expect(mobileStatusLayout.cardScrollWidth).toBeLessThanOrEqual(
+            mobileStatusLayout.cardClientWidth,
+          );
+          await expectNoHorizontalOverflow(page);
+        }
+      } finally {
+        await page.setViewportSize({ width: 1366, height: 900 });
+      }
     },
   );
 
