@@ -6,8 +6,11 @@ import {
   createSolidPngBuffer,
 } from "../../../test/helpers/image-fixtures.js";
 import { makeAgentAssistantMessage } from "../../agents/test-helpers/agent-message-fixtures.js";
+import * as rootLogger from "../../logger.js";
+import * as localMediaAccess from "../../media/local-media-access.js";
 import { readPersistedMediaFacts } from "../../media/media-facts.js";
-import { saveMediaBuffer } from "../../media/store.js";
+import * as mediaReferences from "../../media/media-reference.js";
+import { cleanOldMedia, saveMediaBuffer } from "../../media/store.js";
 import {
   buildPersistedUserTurnMessage,
   createUserTurnTranscriptRecorder,
@@ -121,7 +124,10 @@ function harness() {
 
 describe("cloud turn media boundary", () => {
   beforeEach(setupWorkerTurnLauncherTest);
-  afterEach(cleanupWorkerTurnLauncherTest);
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await cleanupWorkerTurnLauncherTest();
+  });
 
   it("preserves ordered managed image input, follow-up files, replay and canonical paths", async () => {
     seedActivePlacement();
@@ -264,6 +270,287 @@ describe("cloud turn media boundary", () => {
         ?.content,
     ).toEqual(prompt);
   });
+
+  it("honors a text-only selected model for current and replay images while staging attachments", async () => {
+    seedActivePlacement();
+    const rig = harness();
+    const rawImage = {
+      type: "image" as const,
+      data: createSolidPngBuffer(2, 2, { r: 255, g: 0, b: 0 }).toString("base64"),
+      mimeType: "image/png",
+    };
+    await rig.execute({ ...turn("raw-history"), prompt: "raw image", images: [rawImage] });
+    const png = createSolidPngBuffer(2, 2, { r: 0, g: 255, b: 0 });
+    const historical = await saveMediaBuffer(png, "image/png", "inbound");
+    const describedHistory = await saveMediaBuffer(png, "image/png", "inbound");
+    const historyRecorder = createUserTurnTranscriptRecorder({
+      target: { ...sessionTarget, sessionEntry: undefined },
+      input: {
+        text: "structured images",
+        media: [
+          { url: `media://inbound/${historical.id}`, contentType: "image/png" },
+          {
+            url: `media://inbound/${describedHistory.id}`,
+            contentType: "image/png",
+            hydrationSuppressed: true,
+          },
+        ],
+      },
+    });
+    await rig.execute({
+      ...turn("structured-history"),
+      userTurnTranscriptRecorder: historyRecorder,
+    });
+    const canonicalHistory = structuredClone(openSessionManager().buildSessionContext().messages);
+    const rawHistory = canonicalHistory[0];
+    if (rawHistory?.role !== "user") {
+      throw new Error("missing raw user history");
+    }
+    expect(readPersistedMediaFacts(rawHistory) ?? []).toHaveLength(0);
+    expect(rawHistory.content).toContainEqual(rawImage);
+    expect(rig.inputFiles().size).toBe(3);
+
+    const current = await saveMediaBuffer(png, "image/png", "inbound");
+    const describedCurrent = await saveMediaBuffer(png, "image/png", "inbound");
+    const media = [
+      { url: `media://inbound/${current.id}`, contentType: "image/png" },
+      {
+        url: `media://inbound/${describedCurrent.id}`,
+        contentType: "image/png",
+        hydrationSuppressed: true,
+      },
+    ];
+    const recorder = createUserTurnTranscriptRecorder({
+      target: { ...sessionTarget, sessionEntry: undefined },
+      input: { text: "read attachment files", media },
+    });
+    vi.mocked(rig.tunnel.stageAttachments!).mockClear();
+    await rig.execute({
+      ...turn("text-only"),
+      modelHasVision: false,
+      prompt: "read attachment files",
+      images: [rawImage],
+      userTurnTranscriptRecorder: recorder,
+    });
+
+    const assignment = rig.launches[2]!.assignment;
+    expect(rig.tunnel.stageAttachments).toHaveBeenCalledTimes(1);
+    expect(rig.inputFiles().size).toBe(5);
+    for (const saved of [historical, describedHistory, current, describedCurrent]) {
+      const file = [...rig.inputFiles().keys()].find((key) =>
+        key.endsWith(`input-${path.basename(saved.path)}`),
+      );
+      expect(file).toBeDefined();
+      expect(rig.inputFiles().get(file!)).toEqual(png);
+      expect(JSON.stringify([assignment.prompt, assignment.initialMessages])).toContain(
+        path.posix.join("/worker/workspace", file!.split(path.sep).join("/")),
+      );
+    }
+    const currentParts = typeof assignment.prompt === "string" ? [] : assignment.prompt;
+    expect.soft(currentParts.filter((part) => part.type === "image")).toEqual([]);
+    const replayUsers = assignment.initialMessages.filter((message) => message.role === "user");
+    expect(replayUsers).toHaveLength(2);
+    expect
+      .soft(replayUsers.flatMap((message) => message.content).some((part) => part.type === "image"))
+      .toBe(false);
+    expect(replayUsers[0]?.content).toEqual([{ type: "text", text: "raw image" }]);
+    const canonical = openSessionManager().buildSessionContext().messages;
+    expect(canonical.slice(0, canonicalHistory.length)).toEqual(canonicalHistory);
+    expect(readPersistedMediaFacts(canonical.at(-2)!)?.map((fact) => fact.url)).toEqual(
+      media.map((fact) => fact.url),
+    );
+    expect(JSON.stringify(canonical)).not.toContain("/worker/workspace");
+    expect(rig.runLocal).not.toHaveBeenCalled();
+  });
+
+  it("continues plaintext replay after a recent canonical image expires while private input survives", async () => {
+    seedActivePlacement();
+    const rig = harness();
+    const png = createSolidPngBuffer(2, 2, { r: 255, g: 0, b: 0 });
+    const expired = await saveMediaBuffer(png, "image/png", "inbound");
+    const described = await saveMediaBuffer(png, "image/png", "inbound");
+    const media = [
+      { url: `media://inbound/${expired.id}`, contentType: "image/png" },
+      {
+        url: `media://inbound/${described.id}`,
+        contentType: "image/png",
+        hydrationSuppressed: true,
+      },
+    ];
+    const recorder = createUserTurnTranscriptRecorder({
+      target: { ...sessionTarget, sessionEntry: undefined },
+      input: { text: "inspect the image", media },
+    });
+    await rig.execute({ ...turn("before-expiry"), userTurnTranscriptRecorder: recorder });
+    const canonical = structuredClone(openSessionManager().buildSessionContext().messages[0]);
+    expect(readPersistedMediaFacts(canonical!)?.map((fact) => fact.url)).toEqual(
+      media.map((fact) => fact.url),
+    );
+    const privateInputs = rig.inputFiles();
+    expect(privateInputs.size).toBe(2);
+    await rig.execute(turn("plaintext-one"));
+    await rig.execute(turn("plaintext-two"));
+    expect(rig.launches).toHaveLength(3);
+
+    // Age the original only: the configured sweep does not own the worker's private copy.
+    await fs.utimes(expired.path, 0, 0);
+    await cleanOldMedia(60 * 60_000, { recursive: true, pruneEmptyDirs: true });
+    await expect(fs.stat(expired.path)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(described.path)).resolves.toEqual(png);
+    expect(rig.inputFiles()).toEqual(privateInputs);
+    vi.mocked(rig.tunnel.stageAttachments!).mockClear();
+    const warning = vi.spyOn(rootLogger, "logWarn").mockImplementation(() => {});
+
+    await rig.execute({ ...turn("after-expiry"), prompt: "What is two plus two?" });
+
+    expect(rig.launches).toHaveLength(4);
+    expect(rig.launches[3]?.assignment.prompt).toBe("What is two plus two?");
+    const replay = rig.launches[3]?.assignment.initialMessages;
+    const firstUser = replay?.find((message) => message.role === "user");
+    expect(firstUser?.content).toEqual([
+      { type: "text", text: expect.stringContaining("inspect the image") },
+    ]);
+    expect(firstUser?.content[0]).toMatchObject({
+      text: expect.stringContaining("/worker/workspace/media/inbound/openclaw-staged-"),
+    });
+    expect(firstUser?.content[0]).toMatchObject({
+      text: expect.stringContaining(`input-${path.basename(described.path)}`),
+    });
+    expect(rig.tunnel.stageAttachments).toHaveBeenCalledTimes(1);
+    expect(rig.inputFiles()).toEqual(privateInputs);
+    expect(openSessionManager().buildSessionContext().messages[0]).toEqual(canonical);
+    expect(warning.mock.calls).toEqual([
+      ["worker-media: Omitted an unavailable historical attachment source"],
+    ]);
+    expect(rig.runLocal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      modelHasVision: true,
+      contentType: "image/png",
+      hydrationSuppressed: false,
+      error: /could not load 1 image/,
+    },
+    {
+      modelHasVision: true,
+      contentType: "image/png",
+      hydrationSuppressed: true,
+      error: /media ID does not resolve/,
+    },
+    {
+      modelHasVision: true,
+      contentType: "text/plain",
+      hydrationSuppressed: true,
+      error: /media ID does not resolve/,
+    },
+    {
+      modelHasVision: false,
+      contentType: "image/png",
+      hydrationSuppressed: false,
+      error: /media ID does not resolve/,
+    },
+  ])(
+    "rejects unavailable current $contentType input (vision=$modelHasVision, suppressed=$hydrationSuppressed)",
+    async ({ modelHasVision, contentType, hydrationSuppressed, error }) => {
+      seedActivePlacement();
+      const rig = harness();
+      await expect(
+        rig.execute({
+          ...turn("missing-current"),
+          modelHasVision,
+          media: [{ url: "media://inbound/missing", contentType, hydrationSuppressed }],
+        }),
+      ).rejects.toThrow(error);
+      expect(rig.launches).toHaveLength(0);
+      expect(rig.tunnel.stageAttachments).not.toHaveBeenCalled();
+      expect(rig.runLocal).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["cancellation", "admission", "placement"] as const)(
+    "does not omit %s loss while loading a historical source",
+    async (failure) => {
+      seedActivePlacement();
+      const rig = harness();
+      const input = turn("expired-authority");
+      const controller = new AbortController();
+      openSessionManager().appendMessage(
+        buildPersistedUserTurnMessage({
+          text: "described image",
+          media: [
+            { url: "media://inbound/missing", contentType: "image/png", hydrationSuppressed: true },
+          ],
+        }),
+      );
+      const loseAuthority = async () => {
+        if (failure === "cancellation") {
+          controller.abort(new Error("cancelled during source loading"));
+        } else if (failure === "admission") {
+          input.preparedRunAdmission.close();
+        } else {
+          rig.environment.ownerEpoch++;
+        }
+        throw new Error("source unavailable");
+      };
+      if (failure === "placement") {
+        vi.spyOn(mediaReferences, "resolveMediaReferenceLocalPath").mockImplementationOnce(
+          loseAuthority,
+        );
+      } else {
+        vi.spyOn(mediaReferences, "resolveMediaReferenceLocalPath").mockResolvedValueOnce(
+          path.join(root, "source.png"),
+        );
+        vi.spyOn(localMediaAccess, "readLocalMediaFile").mockImplementationOnce(loseAuthority);
+      }
+      const warning = vi.spyOn(rootLogger, "logWarn").mockImplementation(() => {});
+      await expect(rig.execute({ ...input, abortSignal: controller.signal })).rejects.toThrow(
+        failure === "cancellation"
+          ? /cancelled during source loading/
+          : /placement|claim|authority/,
+      );
+      expect(warning).not.toHaveBeenCalled();
+      expect(rig.launches).toHaveLength(0);
+      expect(rig.tunnel.stageAttachments).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["staging write", "transfer"] as const)(
+    "propagates historical attachment %s failures",
+    async (failure) => {
+      seedActivePlacement();
+      const rig = harness();
+      const saved = await saveMediaBuffer(Buffer.from("document"), "text/plain", "inbound");
+      openSessionManager().appendMessage(
+        buildPersistedUserTurnMessage({
+          text: "read the document",
+          media: [{ url: `media://inbound/${saved.id}`, contentType: "text/plain" }],
+        }),
+      );
+      const error = new Error(`historical ${failure} failed`);
+      if (failure === "transfer") {
+        vi.mocked(rig.tunnel.stageAttachments!).mockRejectedValueOnce(error);
+      } else {
+        const writeFile = fs.writeFile;
+        vi.spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+          const destination = args[0];
+          if (
+            typeof destination === "string" &&
+            destination.includes("worker-attachments-") &&
+            path.basename(destination).startsWith("input-")
+          ) {
+            throw error;
+          }
+          return await writeFile(...args);
+        });
+      }
+      const warning = vi.spyOn(rootLogger, "logWarn").mockImplementation(() => {});
+      await expect(rig.execute(turn("failed-staging"))).rejects.toBe(error);
+      expect(warning).not.toHaveBeenCalled();
+      expect(rig.launches).toHaveLength(0);
+      expect(rig.runLocal).not.toHaveBeenCalled();
+    },
+  );
 
   it("stages described image sources without reinjection or pruned history and rejects a retired turn before transfer", async () => {
     seedActivePlacement();

@@ -19,6 +19,7 @@ import type { SessionPlacementTurnParams } from "../../agents/session-placement-
 import { resolveEffectiveToolFsWorkspaceOnly } from "../../agents/tool-fs-policy.js";
 import { tempWorkspace } from "../../infra/private-temp-workspace.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
+import { logWarn } from "../../logger.js";
 import { readLocalMediaFile } from "../../media/local-media-access.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { readPersistedMediaFacts, type MediaFact } from "../../media/media-facts.js";
@@ -40,9 +41,13 @@ import {
 function prepareInput(
   content: Extract<AgentMessage, { role: "user" }>["content"],
   media: MediaFact[],
+  modelHasVision: boolean,
   imageFactIndexes?: readonly ImageFactIndex[],
 ) {
-  const parts = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
+  // Factless replay bypasses hydration, so gate its raw image parts here too.
+  const parts = (
+    typeof content === "string" ? [{ type: "text" as const, text: content }] : content
+  ).filter((part) => modelHasVision || part.type !== "image");
   const unownedImages = parts
     .filter((part) => part.type === "image")
     .filter((_image, index) => {
@@ -92,9 +97,10 @@ export async function prepareWorkerTurnMedia(params: {
   })
     ? [params.localWorkspaceDir]
     : [...getAgentScopedMediaLocalRoots(turn.config ?? {}, turn.agentId), params.localWorkspaceDir];
+  const modelHasVision = turn.modelHasVision === true;
   const mediaOptions = {
     workspaceDir: params.localWorkspaceDir,
-    model: { input: ["text", "image"] },
+    model: { input: modelHasVision ? ["text", "image"] : ["text"] },
     maxBytes: MAX_IMAGE_BYTES,
     maxDimensionPx: resolveImageSanitizationLimits(turn.config).maxDimensionPx,
     localRoots,
@@ -120,6 +126,7 @@ export async function prepareWorkerTurnMedia(params: {
   const current = prepareInput(
     [{ type: "text", text: turn.prompt }, ...currentImages.images],
     media,
+    modelHasVision,
     currentImages.imageFactIndexes,
   );
   const replay = new Map(
@@ -131,6 +138,7 @@ export async function prepareWorkerTurnMedia(params: {
               prepareInput(
                 message.content,
                 readPersistedMediaFacts(message) ?? [],
+                modelHasVision,
                 readPersistedImageBlockFactIndexes(message),
               ),
             ] as const,
@@ -182,13 +190,26 @@ export async function prepareWorkerTurnMedia(params: {
         }
         let remotePath = projectedPaths.get(ref.raw);
         if (!remotePath) {
-          const source = path.resolve(
-            fact.workspaceDir ?? params.localWorkspaceDir,
-            await resolveMediaReferenceLocalPath(ref.resolved),
-          );
-          const data = await readLocalMediaFile(source, localRoots, {
-            maxBytes: Math.max(MAX_IMAGE_BYTES, MEDIA_MAX_BYTES),
-          });
+          let source: string;
+          let data: Buffer;
+          try {
+            source = path.resolve(
+              fact.workspaceDir ?? params.localWorkspaceDir,
+              await resolveMediaReferenceLocalPath(ref.resolved),
+            );
+            data = await readLocalMediaFile(source, localRoots, {
+              maxBytes: Math.max(MAX_IMAGE_BYTES, MEDIA_MAX_BYTES),
+            });
+          } catch (error) {
+            assertCurrent();
+            if (input === current) {
+              throw error;
+            }
+            // Retention can expire replay sources; only current input requires availability.
+            // Keep authority checks and staging/transfer failures outside this omission policy.
+            logWarn("worker-media: Omitted an unavailable historical attachment source");
+            continue;
+          }
           assertCurrent();
           const identity = createHash("sha256").update(source).digest("hex");
           remotePath = await stageFile(data, identity, path.basename(source));
