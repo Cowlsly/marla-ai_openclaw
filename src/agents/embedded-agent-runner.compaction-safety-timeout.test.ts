@@ -1,5 +1,6 @@
 // Covers safety timeouts around embedded-agent compaction calls.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { markRuntimeCompactionDelegate } from "../context-engine/compaction-watchdog.js";
 import { isRuntimeCompactionDelegate } from "../context-engine/delegate.js";
 import { LegacyContextEngine } from "../context-engine/legacy.js";
 import type { CompactResult, ContextEngine } from "../context-engine/types.js";
@@ -274,6 +275,49 @@ describe("compactContextEngineWithSafetyTimeout", () => {
 
     expect(isRuntimeCompactionDelegate(engine.compact)).toBe(true);
     expect(isRuntimeCompactionDelegate(wrapped)).toBe(false);
+  });
+
+  it("does not start the built-in delegate after caller cancellation", async () => {
+    const controller = new AbortController();
+    const reason = new Error("run aborted before compaction");
+    const compact = markRuntimeCompactionDelegate(
+      vi.fn<CompactFn>(async () => ({ ok: true, compacted: false })),
+    );
+    controller.abort(reason);
+
+    await expect(
+      compactContextEngineWithSafetyTimeout(
+        makeEngine(compact),
+        baseParams,
+        EMBEDDED_COMPACTION_TIMEOUT_MS,
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(compact).not.toHaveBeenCalled();
+  });
+
+  it("rejects promptly when caller cancellation interrupts built-in preparation", async () => {
+    const controller = new AbortController();
+    const reason = new Error("run aborted during compaction preparation");
+    const compact = markRuntimeCompactionDelegate(
+      vi.fn<CompactFn>(() => new Promise<CompactResult>(() => {})),
+    );
+    const pending = compactContextEngineWithSafetyTimeout(
+      makeEngine(compact),
+      baseParams,
+      EMBEDDED_COMPACTION_TIMEOUT_MS,
+      controller.signal,
+    );
+
+    controller.abort(reason);
+    const settled = Promise.race([
+      pending,
+      new Promise<"still pending">((resolve) => {
+        setImmediate(() => resolve("still pending"));
+      }),
+    ]);
+
+    await expect(settled).rejects.toBe(reason);
   });
 
   it("threads a signal that follows the run abort signal into the plugin compact() params", async () => {
