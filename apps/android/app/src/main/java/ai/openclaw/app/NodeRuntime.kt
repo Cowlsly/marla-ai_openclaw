@@ -1431,6 +1431,8 @@ class NodeRuntime private constructor(
           operatorConnected = true
           operatorStatusText = "Connected"
         }
+        // Bootstrap can connect the node before operator access is ready.
+        refreshNodesDevices()
         // Method and scope snapshots are synchronous above; refresh only after both so
         // this route cannot inherit readiness from the connection it replaced.
         systemAgentChatController.refresh(startIfNeeded = false)
@@ -1806,11 +1808,10 @@ class NodeRuntime private constructor(
         }
         notificationOutbox.onConnected()
         publishNodePresenceAliveBeacon(NodePresenceAliveBeacon.Trigger.Connect)
+        refreshNodesDevices()
         val endpoint = connectedEndpoint
         val auth = activeGatewayAuth
-        if (operatorConnected) {
-          scope.launch { refreshNodesDevicesFromGateway() }
-        } else if (endpoint != null && auth != null) {
+        if (!operatorConnected && endpoint != null && auth != null) {
           maybeStartOperatorSessionAfterNodeConnect(endpoint, auth)
         }
       },
@@ -1826,9 +1827,7 @@ class NodeRuntime private constructor(
         updateStatus {
           nodeConnectionProblem = gatewayConnectionProblem(error, pauseReconnect)
         }
-        if (operatorConnected && nodeConnectFailureNeedsApprovalRefresh(error)) {
-          scope.launch { refreshNodesDevicesFromGateway() }
-        }
+        if (nodeConnectFailureNeedsApprovalRefresh(error)) refreshNodesDevices()
       },
       onEvent = ::handleNodeGatewayEvent,
       onInvoke = { req ->
