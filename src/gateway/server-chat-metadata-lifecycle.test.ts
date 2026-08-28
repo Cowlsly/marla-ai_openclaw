@@ -104,10 +104,13 @@ describe("gateway chat metadata lifecycle", () => {
     const getPreparedOwner = vi.fn<() => PreparedModelRuntimeSnapshot | undefined>();
     let available = false;
     let revision = 0;
-    const buildProjection = vi.fn(async () => ({
-      modelCatalog: owner.modelCatalog.entries,
-      models: [{ ...owner.modelCatalog.entries[0], available }],
-    }));
+    const buildProjection = vi.fn(async () => {
+      const projection = {
+        modelCatalog: owner.modelCatalog.entries,
+        models: [{ ...owner.modelCatalog.entries[0], available }],
+      };
+      return { read: () => projection, isCurrent: () => true };
+    });
     mocks.createRuntime.mockImplementation((params) =>
       actual.createGatewayChatMetadataRuntime({
         ...params,
