@@ -43,7 +43,7 @@ function unavailableReason(
     (command) => !environment.invocableCommands?.includes(command),
   );
   if (unavailableCommand) {
-    return `${t("pluginsPage.enableAction")} ${unavailableCommand}: gateway.nodes.commands.allow.`;
+    return t("newSession.deviceCommandUnavailable", { command: unavailableCommand });
   }
   if (!requirement.consumesWorkerSlot) {
     return undefined;
