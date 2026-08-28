@@ -1172,9 +1172,6 @@ jobs:
             else
               result=1
             fi
-            if [[ "$result" -ne 0 && -f "$fixture_root/gateway.log" ]]; then
-              tail -n 120 "$fixture_root/gateway.log" >&2
-            fi
             rm -rf "$fixture_root"
             exit "$result"
           }
@@ -1202,9 +1199,9 @@ jobs:
           network_name = "$gateway_name"
           grpc_endpoint = "https://host.openshell.internal:$gateway_port"
           TOML
-          openshell-gateway --config "$fixture_root/gateway.toml" \
+          RUST_LOG=info openshell-gateway --config "$fixture_root/gateway.toml" \
             --bind-address 0.0.0.0 --port "$gateway_port" \
-            > "$fixture_root/gateway.log" 2>&1 &
+            > "$RUNNER_TEMP/$gateway_name.raw.log" 2>&1 &
           gateway_pid=$!
           run_owned openshell gateway add --local --name "$gateway_name" "https://127.0.0.1:$gateway_port"
           ready_deadline=$((SECONDS + 60))
@@ -1224,6 +1221,67 @@ jobs:
           run_owned timeout --foreground 20s openshell --gateway "$gateway_name" sandbox list
           echo "OpenShell bootstrap passed: owned gateway and protected whoami/sandbox list."
           run_owned ${{ matrix.command }}
+
+      - name: Redact OpenShell gateway log
+        if: |
+          always() && inputs.include_repo_e2e &&
+          (inputs.live_suite_filter == '' || inputs.live_suite_filter == matrix.suite_id) &&
+          matrix.suite_id == 'openshell-e2e'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          log_base="$RUNNER_TEMP/openshell-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'rm -f "$log_base.raw.log" "$log_base.redacted.tmp"' EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          # Logging runs after owned-process/PKI cleanup, never extending its
+          # cancellation grace. Only this bounded, redacted file may be uploaded.
+          if timeout --foreground --kill-after=1s 5s node --input-type=module - \
+            "$log_base.raw.log" > "$log_base.redacted.tmp" 2>/dev/null <<'NODE'
+          import fs from "node:fs";
+          import { stripVTControlCharacters } from "node:util";
+          import { redactSensitiveText } from "./dist/plugin-sdk/logging-core.js";
+          const fd = fs.openSync(process.argv[2], "r");
+          try {
+            const size = fs.fstatSync(fd).size;
+            const start = Math.max(0, size - 1024 * 1024);
+            const buffer = Buffer.alloc(size - start);
+            const bytes = fs.readSync(fd, buffer, 0, buffer.length, start);
+            let text = buffer.subarray(0, bytes).toString("utf8");
+            if (start > 0) {
+              const newline = text.indexOf("\n");
+              text = newline < 0 ? "" : text.slice(newline + 1);
+            }
+            text = text.slice(0, text.lastIndexOf("\n") + 1);
+            // v0.0.109 logs SSH bearer UUIDs as session_id/object.id, not token.
+            // Remove full values before canonical redaction, including in spans.
+            text = stripVTControlCharacters(text).replace(
+              /[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/gi, "[redacted-uuid]",
+            );
+            process.stdout.write(redactSensitiveText(text, { mode: "tools" }));
+          } finally {
+            fs.closeSync(fd);
+          }
+          NODE
+          then
+            mv "$log_base.redacted.tmp" "$log_base.log"
+            tail -n 120 "$log_base.log"
+          else
+            echo "OpenShell gateway log omitted: source or canonical redaction unavailable."
+          fi
+
+      - name: Upload redacted OpenShell gateway log
+        if: |
+          always() && inputs.include_repo_e2e &&
+          (inputs.live_suite_filter == '' || inputs.live_suite_filter == matrix.suite_id) &&
+          matrix.suite_id == 'openshell-e2e'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: openshell-gateway-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/openshell-e2e-${{ github.run_id }}-${{ github.run_attempt }}.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   validate_docker_e2e:
     needs:
