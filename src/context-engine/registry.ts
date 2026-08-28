@@ -1,7 +1,6 @@
 // Context-engine registry owns engine registration, resolution, compatibility, and quarantine.
 import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
 import type { OpenClawConfig } from "../config/types.js";
-import { createAbortError, isAbortError } from "../infra/abort-signal.js";
 import type {
   ContextEngineFactory,
   ContextEngineFactoryContext,
@@ -16,6 +15,7 @@ import {
   inheritRuntimeCompactionDelegate,
   markRuntimeCompactionDelegate,
 } from "./compaction-watchdog.js";
+import { contextEngineAbortSignal, isContextEngineAbortRejection } from "./context-engine-abort.js";
 import {
   clearPersistedContextEngineQuarantineForProcess,
   listPersistedContextEngineQuarantines,
@@ -558,44 +558,7 @@ const CONTEXT_ENGINE_FALLBACK_RESULTS = {
   ingestBatch: IngestBatchResult;
 };
 
-function contextEngineAbortSignal(methodParams: unknown): AbortSignal | undefined {
-  const signal = (methodParams as { abortSignal?: unknown } | null | undefined)?.abortSignal;
-  if (!signal || typeof signal !== "object" || !("aborted" in signal)) {
-    return undefined;
-  }
-  const abortSignal = signal as AbortSignal;
-  if (!abortSignal.aborted) {
-    return abortSignal;
-  }
-  const reason = abortSignal.reason;
-  throw reason instanceof Error
-    ? reason
-    : createAbortError(String(reason || "Context engine operation aborted."));
-}
-
-export function isContextEngineAbortRejection(
-  error: unknown,
-  signal: AbortSignal | undefined,
-): boolean {
-  if (!signal?.aborted) {
-    return false;
-  }
-  if (error === signal.reason || isAbortError(error)) {
-    return true;
-  }
-  const seen = new Set<Error>();
-  for (
-    let current = error;
-    current instanceof Error && !seen.has(current);
-    current = current.cause
-  ) {
-    seen.add(current);
-    if (current.cause === signal.reason) {
-      return true;
-    }
-  }
-  return false;
-}
+export { isContextEngineAbortRejection };
 
 async function invokeFallbackContextEngineMethod(params: {
   getFallbackEngine: () => Promise<ContextEngine>;
