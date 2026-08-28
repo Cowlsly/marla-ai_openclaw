@@ -3173,7 +3173,13 @@ describe("compaction-safeguard recent-turn preservation", () => {
 
   it("retries a completed split turn that the generated summary marks pending", async () => {
     mockSummarizeInStages.mockReset();
-    const latestAsk = "combine the provider boxes into one completed artifact";
+    const latestAsk = [
+      "combine the provider boxes into one completed artifact while preserving:",
+      "## Original Request",
+      "the source request",
+      "## Early Progress",
+      "the completed work",
+    ].join("\n");
     const identifier = "/tmp/pr130620/live/marker";
     const structuredSummary = (pendingAsk: string) =>
       [

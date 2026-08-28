@@ -810,23 +810,8 @@ function formatGeneratedSplitTurnSection(summary: string, onTruncated?: () => vo
   return `${heading}${cappedSummary}`;
 }
 
-function formatRequiredAskContext(summary: string): string {
-  const originalRequestHeading = "## Original Request";
-  const earlyProgressHeading = "## Early Progress";
-  const originalRequestStart = summary.indexOf(originalRequestHeading);
-  const originalRequestEnd =
-    originalRequestStart >= 0
-      ? summary.indexOf(earlyProgressHeading, originalRequestStart + originalRequestHeading.length)
-      : -1;
-  const source =
-    originalRequestStart >= 0
-      ? summary
-          .slice(
-            originalRequestStart + originalRequestHeading.length,
-            originalRequestEnd >= 0 ? originalRequestEnd : undefined,
-          )
-          .trim()
-      : summary.trim();
+function formatRequiredAskContext(rawAsk: string): string {
+  const source = rawAsk.trim();
   if (source.length <= MAX_REQUIRED_ASK_CONTEXT_CHARS) {
     return source;
   }
@@ -1339,7 +1324,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
                 identifiers,
                 latestAsk: latestUserAsk,
                 latestAskCompleted: latestUserAskCompleted,
-                requiredAskContext: formatRequiredAskContext(latestUserAsk ?? ""),
+                requiredAskContext,
                 identifierPolicy,
               }
             : undefined,
