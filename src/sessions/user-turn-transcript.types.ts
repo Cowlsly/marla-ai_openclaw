@@ -37,6 +37,7 @@ export type PersistedUserTurnMediaInput = Pick<
 
 export type PersistedUserTurnMessage = Extract<AgentMessage, { role: "user" }> & {
   display?: false;
+  provenance?: InputProvenance;
   __openclaw?: Record<string, unknown>;
 };
 
