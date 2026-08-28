@@ -410,7 +410,7 @@ export async function runEmbeddedFallbackCandidate(
       ),
     };
   } finally {
-    params.onCompactionCount(attemptCompactionCount + recoveryCompactionCount);
+    params.onCompactionCount(Math.max(attemptCompactionCount, recoveryCompactionCount));
     revokeMessageActionTurnCapability(messageActionTurnCapability);
   }
 }

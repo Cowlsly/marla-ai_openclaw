@@ -193,6 +193,23 @@ describe("executeAgentTurn: compaction events", () => {
     expect(retainFailureUntilCompleteMock).toHaveBeenCalled();
   });
 
+  it("counts a returned recovery compaction once across callback and result metadata", async () => {
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      params.onAutoCompaction?.({ kind: "succeeded", count: 1 });
+      return {
+        payloads: [{ text: "recovered" }],
+        meta: { agentMeta: { compactionCount: 1 } },
+      };
+    });
+
+    const result = await executeTestTurn();
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.autoCompactionCount).toBe(1);
+    }
+  });
+
   it("preserves successful compaction when the last fallback still overflows", async () => {
     const { replyOperation, retainFailureUntilCompleteMock } = createMockReplyOperation();
     state.isContextOverflowErrorMock.mockReturnValue(true);
