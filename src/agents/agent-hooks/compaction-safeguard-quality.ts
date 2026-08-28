@@ -146,6 +146,7 @@ export function createSummaryQualityRetentionPlan(
     auditSummary?: string;
     identifiers: string[];
     latestAsk: string | null;
+    latestAskInRetainedTurn?: boolean;
     requiredAskContext?: string;
     identifierPolicy?: CompactionSummarizationInstructions["identifierPolicy"];
   },
@@ -153,7 +154,7 @@ export function createSummaryQualityRetentionPlan(
   const requiredAskContext = params.requiredAskContext?.trim() ?? "";
   const bodyHasLatestAsk = hasAskOverlap(params.auditSummary ?? summary, params.latestAsk);
   const requiredContextBlock =
-    bodyHasLatestAsk && requiredAskContext
+    (bodyHasLatestAsk || params.latestAskInRetainedTurn) && requiredAskContext
       ? `## Latest user request context\n${JSON.stringify(requiredAskContext)}`
       : "";
   const parsedSummary =
@@ -167,10 +168,10 @@ export function createSummaryQualityRetentionPlan(
   const enforceIdentifiers = (params.identifierPolicy ?? "strict") === "strict";
   const auditedIdentifiers = enforceIdentifiers ? params.identifiers : [];
   const marker = truncatedMarker.trim();
-  // Keep the model's completed/pending classification unchanged. When it reflects the ask,
-  // preserve exact source text in a neutral prefix; when it omits the ask, fail safe to Pending.
+  // A split ask remains paired with its retained turn suffix, which owns continuation state.
+  // Other asks keep the model's classification and fail safe to Pending when omitted.
   const protectedAskContext =
-    !bodyHasLatestAsk && requiredAskContext
+    !bodyHasLatestAsk && !params.latestAskInRetainedTurn && requiredAskContext
       ? `${LATEST_USER_REQUEST_CONTEXT_LABEL}\n${JSON.stringify(requiredAskContext)}`
       : "";
   const protectedTails = REQUIRED_SUMMARY_SECTIONS.map((_, index) =>
@@ -424,6 +425,7 @@ export function auditSummaryQuality(params: {
   sourceSummaries?: string[];
   identifiers: string[];
   latestAsk: string | null;
+  latestAskInRetainedTurn?: boolean;
   identifierPolicy?: CompactionSummarizationInstructions["identifierPolicy"];
 }): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
@@ -451,6 +453,17 @@ export function auditSummaryQuality(params: {
   }
   if (!hasAskOverlap(params.summary, params.latestAsk)) {
     reasons.push("latest_user_ask_not_reflected");
+  }
+  if (
+    params.latestAskInRetainedTurn &&
+    params.sourceSummaries?.some((source) =>
+      hasAskOverlap(
+        parseRequiredSummarySectionContents(source)?.[PENDING_ASK_SECTION_INDEX] ?? "",
+        params.latestAsk,
+      ),
+    )
+  ) {
+    reasons.push("retained_turn_ask_marked_pending");
   }
   return { ok: reasons.length === 0, reasons };
 }

@@ -219,6 +219,7 @@ type SummaryQualityRetention = {
   auditSummary?: string;
   identifiers: string[];
   latestAsk: string | null;
+  latestAskInRetainedTurn?: boolean;
   requiredAskContext: string;
   identifierPolicy: "strict" | "off" | "custom";
 };
@@ -989,10 +990,14 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
     const providerId = runtime?.provider;
     const turnPrefixMessages = baseTurnPrefixMessages;
     const recentTurnsPreserve = resolveRecentTurnsPreserve(runtime?.recentTurnsPreserve);
-    const structuredInstructions = buildCompactionStructureInstructions(
-      customInstructions,
-      summarizationInstructions,
-    );
+    const structuredInstructions = [
+      buildCompactionStructureInstructions(customInstructions, summarizationInstructions),
+      preparation.isSplitTurn
+        ? "The latest user request belongs to a split turn whose remaining suffix stays verbatim; preserve its work state outside ## Pending user asks."
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
     let workspaceContextPromise: Promise<string> | undefined;
     const finalizeSummaryText = async (
       body: string,
@@ -1321,6 +1326,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
                 auditSummary: unbudgetedSummary,
                 identifiers,
                 latestAsk: latestUserAsk,
+                latestAskInRetainedTurn: preparation.isSplitTurn,
                 requiredAskContext,
                 identifierPolicy,
               }
@@ -1350,6 +1356,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           sourceSummaries: [historySummary, splitTurnSummaryLocal].filter(Boolean),
           identifiers,
           latestAsk: latestUserAsk,
+          latestAskInRetainedTurn: preparation.isSplitTurn,
           identifierPolicy,
         });
         if (quality.ok) {

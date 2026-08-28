@@ -3117,16 +3117,16 @@ describe("compaction-safeguard recent-turn preservation", () => {
     expect(consumeCompactionSafeguardCancelReason(sessionManager)).toBeNull();
   });
 
-  it("keeps the split-turn model's pending state while retaining exact source context", async () => {
+  it("keeps a split-turn request neutral while its retained suffix owns continuation state", async () => {
     mockSummarizeInStages.mockReset();
     const latestAsk = "combine the provider boxes into one completed artifact";
     const identifier = "/tmp/pr130620/live/marker";
-    const structuredSummary = (pendingAsk: string) =>
+    const structuredSummary = (pendingAsk: string, openTodo: string) =>
       [
         "## Decisions",
         "Keep the provider-box work active.",
         "## Open TODOs",
-        "None.",
+        openTodo,
         "## Constraints/Rules",
         "Preserve exact identifiers.",
         "## Pending user asks",
@@ -3134,7 +3134,9 @@ describe("compaction-safeguard recent-turn preservation", () => {
         "## Exact identifiers",
         identifier,
       ].join("\n");
-    mockSummarizeInStages.mockResolvedValue(summaryResult(structuredSummary(latestAsk)));
+    mockSummarizeInStages
+      .mockResolvedValueOnce(summaryResult(structuredSummary(latestAsk, "Implement the repair.")))
+      .mockResolvedValueOnce(summaryResult(structuredSummary("None.", "Implement the repair.")));
 
     const sessionManager = stubSessionManager();
     setCompactionSafeguardRuntime(sessionManager, {
@@ -3149,7 +3151,12 @@ describe("compaction-safeguard recent-turn preservation", () => {
           { role: "user", content: latestAsk, timestamp: 1 },
           castAgentMessage({
             role: "assistant",
-            content: [{ type: "text", text: `Preserve ${identifier}.` }],
+            content: [
+              {
+                type: "text",
+                text: `The RCA is complete; implementation remains. Preserve ${identifier}.`,
+              },
+            ],
             timestamp: 2,
           }),
         ] as AgentMessage[],
@@ -3166,9 +3173,11 @@ describe("compaction-safeguard recent-turn preservation", () => {
     const { result } = await runCompactionScenario({ sessionManager, event, apiKey: "test-key" });
 
     const finalSummary = expectCompactionResult(result).summary;
-    expect(mockSummarizeInStages).toHaveBeenCalledTimes(1);
+    expect(mockSummarizeInStages).toHaveBeenCalledTimes(2);
     expect(finalSummary).toContain(`## Latest user request context\n${JSON.stringify(latestAsk)}`);
-    expect(finalSummary).toContain(`## Pending user asks\n${latestAsk}`);
+    expect(finalSummary).toContain("## Open TODOs\nImplement the repair.");
+    expect(finalSummary).toContain("## Pending user asks\nNone.");
+    expect(finalSummary).not.toContain(`## Pending user asks\n${latestAsk}`);
   });
 
   it("does not revive a split-turn request the model classified as completed", async () => {
