@@ -1427,6 +1427,9 @@ describe("runReplyAgent post-compaction failure", () => {
     });
     expect(replyOperation.result).toMatchObject({ kind: "failed" });
     expect(payload?.text).toBe(BILLING_ERROR_USER_MESSAGE);
+    expect(getReplyPayloadMetadata(payload ?? {})).toMatchObject({
+      postCompactionModelFailure: true,
+    });
   });
 
   it("does not call a later persistence failure a model failure", async () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { BILLING_ERROR_USER_MESSAGE } from "../../agents/failover/user-copy.js";
 import { readAgentRunTerminalOutcome } from "../../channels/turn/agent-run-terminal-outcome.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { setReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 import {
   createDispatcher,
@@ -102,13 +103,12 @@ describe("dispatchReplyFromConfig terminal visible admission recovery", () => {
   });
 
   it("renders successful compaction after dispatcher normalization", async () => {
-    const dispatchParams = createVisibleDispatchParams(async (_ctx, options) => {
-      const operation = options?.replyOperation;
-      if (operation) {
-        operation.postCompactionOutcome = { kind: "later_model_failed", count: 1 };
-      }
-      return { text: BILLING_ERROR_USER_MESSAGE, isError: true };
-    });
+    const dispatchParams = createVisibleDispatchParams(async () =>
+      setReplyPayloadMetadata(
+        { text: BILLING_ERROR_USER_MESSAGE, isError: true },
+        { postCompactionModelFailure: true },
+      ),
+    );
 
     await dispatchReplyFromConfig(dispatchParams);
 

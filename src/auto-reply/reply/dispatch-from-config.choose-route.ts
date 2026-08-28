@@ -14,7 +14,6 @@ import {
   shouldDeferFinalTtsText,
 } from "../../tts/captioned-final.js";
 import { shouldCleanTtsDirectiveText } from "../../tts/tts-config.js";
-import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { registerReplyDispatcherSettledTask } from "../dispatch-dispatcher.js";
 import {
   copyReplyPayloadMetadata,
@@ -318,12 +317,7 @@ export async function chooseDispatchRoute(state: PrepareDispatchOperationReadySt
         suppressionReason: preparation.reason,
       };
     }
-    const payload = renderPostCompactionFailurePayload(
-      params.replyOptions?.isHeartbeat === true || isInternalMessageChannel(deliveryChannel)
-        ? undefined
-        : state.getDispatchReplyOperation(),
-      preparation.payload,
-    );
+    const payload = renderPostCompactionFailurePayload(preparation.payload);
     const payloadMetadata = getReplyPayloadMetadata(payload);
     const expectedWriterRunId = normalizeOptionalString(params.replyOptions?.runId);
     const expectedLifecycleRevision = sessionStoreEntry.entry?.lifecycleRevision;

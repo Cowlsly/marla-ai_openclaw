@@ -36,8 +36,11 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { buildCodexLoginRecovery } from "../codex-login-recovery.js";
 import {
+  copyReplyPayloadMetadata,
+  getReplyPayloadMetadata,
   isReplyPayloadTerminalContent,
   markReplyPayloadForSourceSuppressionDelivery,
+  setReplyPayloadMetadata,
 } from "../reply-payload.js";
 import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
@@ -320,19 +323,25 @@ export function markPostCompactionModelFailure(operation: ReplyOperation | undef
   }
 }
 
-export function renderPostCompactionFailurePayload(
+export function markPostCompactionFailurePayload(
   operation: ReplyOperation | undefined,
   payload: ReplyPayload,
 ): ReplyPayload {
-  const outcome = operation?.postCompactionOutcome;
-  return outcome?.kind === "later_model_failed" &&
+  return operation?.postCompactionOutcome?.kind === "later_model_failed" &&
     payload.isError === true &&
     isReplyPayloadTerminalContent(payload) &&
     typeof payload.text === "string"
-    ? {
+    ? setReplyPayloadMetadata(payload, { postCompactionModelFailure: true })
+    : payload;
+}
+
+export function renderPostCompactionFailurePayload(payload: ReplyPayload): ReplyPayload {
+  return getReplyPayloadMetadata(payload)?.postCompactionModelFailure === true &&
+    typeof payload.text === "string"
+    ? copyReplyPayloadMetadata(payload, {
         ...payload,
         text: `⚠️ Context compaction succeeded, but the later model request still failed. ${payload.text.replace(/^⚠️\s*/u, "")}`,
-      }
+      })
     : payload;
 }
 
