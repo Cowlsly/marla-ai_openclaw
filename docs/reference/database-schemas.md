@@ -136,6 +136,8 @@ Version 3 was an unshipped development step folded into version 4.
 
 Schema 14 adds `github_publication_requests.source_branch` as the required local worktree branch. The existing `branch` column records the frozen GitHub destination. Migration copies each existing `branch` into `source_branch`, preserving queued requests and published branches.
 
+Startup and doctor refuse to rebuild a noncanonical legacy publication table. Unknown columns, indexes, and triggers remain intact. Create a verified backup and review the schema drift before retrying; neither path removes unknown objects to force the upgrade.
+
 This version fence prevents older Gateways from recovering a publication with the remote branch mistaken for the local worktree branch. The worktree directory and local branch remain unchanged. Once a publication records its destination, retries and restart recovery reuse it even if the session title changes.
 
 A schema 13 or older build cannot open this database. To roll back, restore a verified pre-upgrade backup or use a separate state directory. Do not lower `user_version` or drop the new column: a record with different source and destination branches cannot be interpreted safely by the older publication flow.

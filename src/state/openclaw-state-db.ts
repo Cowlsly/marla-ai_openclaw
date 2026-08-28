@@ -222,7 +222,7 @@ function repairOpenClawStateDatabaseSchemaWithWriteAccess(
           if (migrateJsonCanonicalWideRowsV13(db, previousVersion)) {
             applied.push("Consolidated shared state tables (v13)");
           }
-          if (migrateGitHubPublicationBranches(db, previousVersion)) {
+          if (migrateGitHubPublicationBranches(db, previousVersion, pathname)) {
             applied.push("Separated GitHub publication source and destination branches (v14)");
           }
           executeCanonicalStateSchema(db, {
@@ -407,7 +407,7 @@ function ensureSchema(
         const pathMigration: AgentPathSummary = migrateAgentPaths(db, previousVersion, pathname);
         ensureAdditiveStateColumns(db);
         migrateJsonCanonicalWideRowsV13(db, previousVersion);
-        migrateGitHubPublicationBranches(db, previousVersion);
+        migrateGitHubPublicationBranches(db, previousVersion, pathname);
         sessionWatchMigration.migrateSessionWatchCursorProvenance(db);
         assertCanonicalStateSchemaShape(db, pathname);
         executeCanonicalStateSchema(db, {
