@@ -298,7 +298,7 @@ type MediaSourceVersion = {
   trajectoryBytes: number;
   trajectoryRows: number;
   transcriptBytes: number;
-  transcriptCreatedAt: number;
+  transcriptCreatedAt: string;
   transcriptRows: number;
 };
 
@@ -309,7 +309,7 @@ function readMediaSourceVersion(database: DatabaseSync): MediaSourceVersion {
       `SELECT
         (SELECT COUNT(*) FROM transcript_events) AS transcript_rows,
         (SELECT COALESCE(SUM(LENGTH(event_json)), 0) FROM transcript_events) AS transcript_bytes,
-        (SELECT COALESCE(SUM(created_at), 0) FROM transcript_events) AS transcript_created_at,
+        (SELECT CAST(COALESCE(SUM(created_at), 0) AS TEXT) FROM transcript_events) AS transcript_created_at,
         (SELECT COUNT(*) FROM trajectory_runtime_events) AS trajectory_rows,
         (SELECT COALESCE(SUM(LENGTH(event_json)), 0) FROM trajectory_runtime_events) AS trajectory_bytes`,
     )
@@ -317,12 +317,16 @@ function readMediaSourceVersion(database: DatabaseSync): MediaSourceVersion {
   const number = (value: unknown): number =>
     typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : 0;
   const count = (key: string): number => number(isRecord(counts) ? counts[key] : undefined);
+  const text = (key: string): string => {
+    const value = isRecord(counts) ? counts[key] : undefined;
+    return typeof value === "string" ? value : "0";
+  };
   return {
     dataVersion: number(isRecord(dataVersionRow) ? dataVersionRow.data_version : undefined),
     trajectoryBytes: count("trajectory_bytes"),
     trajectoryRows: count("trajectory_rows"),
     transcriptBytes: count("transcript_bytes"),
-    transcriptCreatedAt: count("transcript_created_at"),
+    transcriptCreatedAt: text("transcript_created_at"),
     transcriptRows: count("transcript_rows"),
   };
 }
