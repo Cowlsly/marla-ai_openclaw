@@ -286,7 +286,8 @@ export async function recoverEmbeddedRunOverflow(
           );
         }
       }
-      input.state.autoCompactionCount += 1;
+      const compactionCount = ++input.state.autoCompactionCount;
+      input.runParams.onAutoCompaction?.({ kind: "succeeded", count: compactionCount });
       input.armPostCompactionGuard();
       if (parkedWorkBlocksContinuation) {
         log.warn(

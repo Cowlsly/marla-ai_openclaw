@@ -131,6 +131,7 @@ export async function runEmbeddedFallbackCandidate(
         })
       : undefined;
   let attemptCompactionCount = 0;
+  let recoveryCompactionCount = 0;
   const lifecycleBackstop = createAgentLifecycleTerminalBackstop({
     runId: params.runId,
     sessionKey: turn.sessionKey,
@@ -202,6 +203,9 @@ export async function runEmbeddedFallbackCandidate(
           turn.followupRun.run.suppressTranscriptOnlyAssistantPersistence,
         suppressAssistantErrorPersistence: params.suppressAssistantErrorPersistenceForCandidate,
         onAssistantErrorMessagePersisted: params.onAssistantErrorMessagePersisted,
+        onAutoCompaction: (outcome) => {
+          recoveryCompactionCount = Math.max(recoveryCompactionCount, outcome.count);
+        },
         toolResultFormat: (() => {
           const channel = resolveMessageChannel(turn.sessionCtx.Surface, turn.sessionCtx.Provider);
           return !channel || isMarkdownCapableMessageChannel(channel) ? "markdown" : "plain";
@@ -400,7 +404,7 @@ export async function runEmbeddedFallbackCandidate(
       ),
     };
   } finally {
-    params.onCompactionCount(attemptCompactionCount);
+    params.onCompactionCount(attemptCompactionCount + recoveryCompactionCount);
     revokeMessageActionTurnCapability(messageActionTurnCapability);
   }
 }

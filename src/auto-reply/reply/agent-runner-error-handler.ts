@@ -49,6 +49,12 @@ import {
   resolveRestartLifecycleError,
 } from "./reply-operation-abort.js";
 
+function renderPostCompactionFailureText(text: string, compactionCount: number): string {
+  return compactionCount > 0
+    ? `⚠️ Context compaction succeeded, but the later model request still failed. ${text.replace(/^⚠️\s*/u, "")}`
+    : text;
+}
+
 const MAX_LIVE_SWITCH_RETRIES = 2;
 const TRANSIENT_HTTP_RETRY_DELAY_MS = 2_500;
 // Overload recovery stays inside one turn: bounded backoff absorbs short provider incidents,
@@ -232,6 +238,8 @@ export async function handleAgentExecutionError(params: {
   const isTransientHttp =
     isTransientHttpError(message) ||
     (isFailoverError(err) && (err.reason === "timeout" || err.reason === "server_error"));
+  const visibleCompactionCount =
+    turn.isHeartbeat || params.shouldSurfaceToControlUi ? 0 : params.state.autoCompactionCount;
 
   const replyOperationAbortAction = resolveReplyOperationAbortAction(err);
   if (replyOperationAbortAction) {
@@ -426,15 +434,6 @@ export async function handleAgentExecutionError(params: {
     }
     return { kind: "retry" };
   }
-  if (providerRequestError) {
-    takePendingLifecycleTerminal().emit("error", err);
-    turn.replyOperation?.fail("run_failed", err);
-    await params.modelPatch.fail(err);
-    return {
-      kind: "final",
-      payload: markAgentRunFailureReplyPayload({ text: providerRequestError.userMessage }),
-    };
-  }
   defaultRuntime.error(`Embedded agent failed before reply: ${message}`);
   const isPureTransientSummary = Boolean(
     hasFallbackAttempts &&
@@ -477,7 +476,8 @@ export async function handleAgentExecutionError(params: {
     !params.shouldSurfaceToControlUi || externalRunFailureCandidate?.presentation
       ? externalRunFailureCandidate
       : undefined;
-  const fallbackText = isBilling
+  let fallbackText = providerRequestError?.userMessage;
+  fallbackText ??= isBilling
     ? renderBillingReplyCopy({
         attempts: fallbackAttempts,
         ...(isFailoverError(err)
@@ -504,11 +504,14 @@ export async function handleAgentExecutionError(params: {
                 ? HEARTBEAT_EXTERNAL_RUN_FAILURE_TEXT
                 : GENERIC_EXTERNAL_RUN_FAILURE_TEXT));
   const userVisibleFallbackText = resolveExternalRunFailureTextForConversation({
-    text: fallbackText,
+    text: renderPostCompactionFailureText(fallbackText, visibleCompactionCount),
     sessionCtx: turn.sessionCtx,
     isGenericRunnerFailure: externalRunFailureReply?.isGenericRunnerFailure ?? false,
     cfg: turn.followupRun.run.config,
   });
+  if (visibleCompactionCount > 0) {
+    turn.replyOperation?.retainFailureUntilComplete();
+  }
   takePendingLifecycleTerminal().emit("error", err, { fallbackExhaustedFailure: true });
   turn.replyOperation?.fail("run_failed", err);
   await params.modelPatch.fail(err);

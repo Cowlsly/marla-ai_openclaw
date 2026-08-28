@@ -1,13 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import { BILLING_ERROR_USER_MESSAGE } from "../../agents/failover/user-copy.js";
 import { resetLogger, setLoggerOverride } from "../../logging/logger.js";
 import { loggingState } from "../../logging/state.js";
 import {
   setupAgentRunnerExecutionTestState,
+  createMockReplyOperation,
   getExecuteAgentTurnForTest,
   createFollowupRun,
   initialFallbackAttemptOptions,
   expectBlockReplyCall,
   createMinimalRunAgentTurnParams,
+  createTestFallbackSummaryError,
 } from "./agent-runner-execution.test-support.js";
 import type {
   FallbackRunnerParams,
@@ -133,6 +136,48 @@ describe("executeAgentTurn: compaction events", () => {
       setLoggerOverride(null);
       resetLogger();
     }
+  });
+
+  it("preserves successful compaction in a later fallback failure", async () => {
+    const { replyOperation, retainFailureUntilCompleteMock } = createMockReplyOperation();
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      params.onAutoCompaction?.({ kind: "succeeded", count: 1 });
+      throw new Error("LLM request timed out.");
+    });
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      await params
+        .run("openai", "gpt-5.6-luna", initialFallbackAttemptOptions(params))
+        .catch(() => undefined);
+      throw createTestFallbackSummaryError({
+        message:
+          "All models failed (2): openai/gpt-5.6-luna: LLM request timed out. (timeout) | anthropic/claude-sonnet-4-6: billing unavailable (billing)",
+        attempts: [
+          {
+            provider: "openai",
+            model: "gpt-5.6-luna",
+            error: "LLM request timed out.",
+            reason: "timeout",
+          },
+          {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            error: "billing unavailable",
+            reason: "billing",
+          },
+        ],
+      });
+    });
+
+    const result = await executeTestTurn({ replyOperation });
+
+    expect(result.kind).toBe("final");
+    if (result.kind !== "final") {
+      throw new Error("expected final reply");
+    }
+    expect(result.payload.text).toBe(
+      `⚠️ Context compaction succeeded, but the later model request still failed. ${BILLING_ERROR_USER_MESSAGE.replace(/^⚠️\s*/u, "")}`,
+    );
+    expect(retainFailureUntilCompleteMock).toHaveBeenCalledOnce();
   });
 
   it("emits a compaction start notice when notifyUser is enabled", async () => {

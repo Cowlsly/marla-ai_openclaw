@@ -442,6 +442,7 @@ export type EmbeddedAgentParams = {
     approvalId?: string;
     approvalSlug?: string;
   }) => Promise<void> | void;
+  onAutoCompaction?: (outcome: { kind: "succeeded"; count: number }) => void;
   onAgentEvent?: (payload: {
     stream: string;
     data: Record<string, unknown>;

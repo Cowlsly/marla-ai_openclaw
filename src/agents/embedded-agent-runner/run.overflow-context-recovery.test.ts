@@ -119,6 +119,7 @@ function makeInput(overrides: RecoveryInputOverrides = {}): RecoveryInput {
       workspaceDir: "/tmp/workspace",
       prompt: "continue",
       timeoutMs: 1_000,
+      onAutoCompaction: vi.fn(),
     },
     state: createEmbeddedRunContextRecoveryState(),
     contextEngine: {
@@ -489,6 +490,10 @@ describe("recoverEmbeddedRunOverflow", () => {
       expect.objectContaining({ compacted: true, ok: true }),
       undefined,
     );
+    expect(input.runParams.onAutoCompaction).toHaveBeenCalledWith({
+      kind: "succeeded",
+      count: 1,
+    });
   });
 
   it("leaves overflow recovery to a transport-owning harness", async () => {
