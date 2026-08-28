@@ -1,3 +1,4 @@
+import { isStagedInputPath, STAGED_INPUT_DIRECTORY_PREFIX } from "../../media/staged-inputs.js";
 import { REMOTE_WORKSPACE_MUTATION_LOCK_JS } from "./workspace-mutation-lock-remote-script.js";
 import {
   DERIVED_WORKSPACE_DIRECTORY_NAMES,
@@ -155,6 +156,9 @@ ${REMOTE_WORKSPACE_MUTATION_LOCK_JS}
 const DERIVED_WORKSPACE_DIRECTORY_NAMES = ${JSON.stringify(DERIVED_WORKSPACE_DIRECTORY_NAMES)};
 const DERIVED_WORKSPACE_FILE_NAMES = ${JSON.stringify(DERIVED_WORKSPACE_FILE_NAMES)};
 const DERIVED_WORKSPACE_FILE_SUFFIXES = ${JSON.stringify(DERIVED_WORKSPACE_FILE_SUFFIXES)};
+const STAGED_INPUT_DIRECTORY_PREFIX = ${JSON.stringify(STAGED_INPUT_DIRECTORY_PREFIX)};
+const isStagedInputPath = ${isStagedInputPath.toString()};
+const retainedInputPath = isStagedInputPath;
 const isDerivedWorkspacePath = ${isDerivedWorkspacePath.toString()};
 function clean(directory, relativeDirectory) {
   const originalMode = fs.lstatSync(directory).mode & 0o7777;

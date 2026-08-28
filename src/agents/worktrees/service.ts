@@ -7,6 +7,7 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { resolveStateDir } from "../../config/paths.js";
 import { isMissingPathError, formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { isStagedInputPath, STAGED_INPUT_GIT_PATHSPEC } from "../../media/staged-inputs.js";
 import { createCommandError } from "../../process/command-error.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { withOpenClawStateLease } from "../../state/openclaw-state-lease.js";
@@ -555,6 +556,21 @@ async function snapshotWorktree(
       ["ls-files", "-z", "--others", "--exclude-standard"],
     ]) {
       for (const entry of splitNullBuffer(await requireGitBuffer(record.path, args))) {
+        addSnapshotPath(entry);
+      }
+    }
+    for (const entry of splitNullBuffer(
+      await requireGitBuffer(record.path, [
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--",
+        STAGED_INPUT_GIT_PATHSPEC,
+      ]),
+    )) {
+      if (isStagedInputPath(entry.toString("utf8"))) {
         addSnapshotPath(entry);
       }
     }

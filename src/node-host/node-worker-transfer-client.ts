@@ -17,9 +17,11 @@ import {
 import { absoluteEntryMatches } from "../gateway/worker-environments/workspace-reconcile-fs.js";
 import { workerWorkspaceTransferPaths } from "../gateway/worker-environments/workspace-result-staging.js";
 import { REMOTE_WORKSPACE_MANIFEST_JS } from "../gateway/worker-environments/workspace-sync-scripts.js";
+import { root as fsRoot, FsSafeError } from "../infra/fs-safe.js";
 import { isPathInside } from "../infra/path-guards.js";
 import { tempWorkspace } from "../infra/private-temp-workspace.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { ensureStagedInputDirectory, isStagedInputPath } from "../media/staged-inputs.js";
 import { runExec } from "../process/exec.js";
 import {
   nodeWorkspaceTransferBlobPath,
@@ -362,6 +364,13 @@ async function downloadWorkspace(params: {
     MAX_WORKSPACE_MANIFEST_BYTES,
   );
   const manifest = parseWorkerWorkspaceManifest(raw.toString("utf8"), params.transfer.manifestRef);
+  if (
+    params.transfer.attachments &&
+    (manifest.baseCommit !== null ||
+      manifest.entries.some((entry) => entry.type !== "file" || !isStagedInputPath(entry.path)))
+  ) {
+    throw new Error("Invalid worker attachment manifest");
+  }
   const stagingWorkspace = await tempWorkspace({
     rootDir: path.dirname(params.workspaceDir),
     prefix: `.${path.basename(params.workspaceDir)}.workspace-transfer-`,
@@ -473,7 +482,30 @@ async function downloadWorkspace(params: {
         `workspace transfer materialized a different manifest (${observed}/${params.transfer.manifestRef})`,
       );
     }
-    await replaceWorkspace(params.workspaceDir, staging);
+    if (params.transfer.attachments) {
+      const root = await fsRoot(params.workspaceDir);
+      for (const directory of new Set(
+        manifest.entries.map((entry) => path.posix.dirname(entry.path)),
+      )) {
+        params.signal?.throwIfAborted();
+        await ensureStagedInputDirectory(params.workspaceDir, directory, params.signal);
+      }
+      for (const entry of manifest.entries) {
+        const data = await fsp.readFile(workspacePath(staging, entry.path));
+        params.signal?.throwIfAborted();
+        try {
+          // Replay must preserve edits made to an attachment by earlier worker turns.
+          await root.create(entry.path, data, { mode: 0o600 });
+        } catch (error) {
+          if (!(error instanceof FsSafeError) || error.code !== "already-exists") {
+            throw error;
+          }
+          await root.open(entry.path).then((opened) => opened.handle.close());
+        }
+      }
+    } else {
+      await replaceWorkspace(params.workspaceDir, staging);
+    }
     transferLog.debug("node worker workspace transfer completed", {
       environmentId: params.environmentId,
       direction: "download",

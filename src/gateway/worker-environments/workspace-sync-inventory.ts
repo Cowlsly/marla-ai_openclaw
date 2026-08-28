@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { sliceUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { hasNodeErrorCode } from "../../infra/path-guards.js";
+import { isStagedInputPath, STAGED_INPUT_GIT_PATHSPEC } from "../../media/staged-inputs.js";
 import { killProcessTree } from "../../process/kill-tree.js";
 import { workerSshCommandOptions } from "./ssh.js";
 import { isPortableRootContainedSymlink } from "./workspace-actual-manifest.js";
@@ -430,24 +431,18 @@ async function writeEligibleGitFiles(params: {
     for await (const file of readBoundedGitPathCandidates(params.eligiblePath)) {
       await appendIfTransferable(file);
     }
-    const ignored = readBoundedGitPathCandidates(params.ignoredPath)[Symbol.asyncIterator]();
     const selected = readBoundedGitPathCandidates(params.selectedPath)[Symbol.asyncIterator]();
-    let ignoredItem = await ignored.next();
     let selectedItem = await selected.next();
-    while (!ignoredItem.done && !selectedItem.done) {
-      const order = Buffer.compare(Buffer.from(ignoredItem.value), Buffer.from(selectedItem.value));
-      if (order === 0) {
-        await appendIfTransferable(ignoredItem.value);
-        ignoredItem = await ignored.next();
-        selectedItem = await selected.next();
-      } else if (order < 0) {
-        ignoredItem = await ignored.next();
-      } else {
+    for await (const file of readBoundedGitPathCandidates(params.ignoredPath)) {
+      while (
+        !selectedItem.done &&
+        Buffer.compare(Buffer.from(selectedItem.value), Buffer.from(file)) < 0
+      ) {
         selectedItem = await selected.next();
       }
-    }
-    while (!ignoredItem.done) {
-      ignoredItem = await ignored.next();
+      if (isStagedInputPath(file) || (!selectedItem.done && selectedItem.value === file)) {
+        await appendIfTransferable(file);
+      }
     }
     while (!selectedItem.done) {
       selectedItem = await selected.next();
@@ -492,52 +487,42 @@ export async function createWorkspaceGitTransferList(params: {
     }
     throw error;
   });
+  await runWorkspaceInventoryCommandToFile({
+    argv: [
+      "git",
+      "-C",
+      params.gitRoot,
+      "ls-files",
+      "--full-name",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      ...(worktreeInclude?.isFile() ? [] : ["--", STAGED_INPUT_GIT_PATHSPEC]),
+    ],
+    outputPath: ignoredPath,
+    signal: params.signal,
+    timeoutMs: params.timeoutMs,
+  });
   if (worktreeInclude?.isFile()) {
-    const [ignoredResult, selectedResult] = await Promise.allSettled([
-      runWorkspaceInventoryCommandToFile({
-        argv: [
-          "git",
-          "-C",
-          params.gitRoot,
-          "ls-files",
-          "--full-name",
-          "--others",
-          "--ignored",
-          "--exclude-standard",
-          "-z",
-        ],
-        outputPath: ignoredPath,
-        signal: params.signal,
-        timeoutMs: params.timeoutMs,
-      }),
-      runWorkspaceInventoryCommandToFile({
-        argv: [
-          "git",
-          "-C",
-          params.gitRoot,
-          "ls-files",
-          "--full-name",
-          "--others",
-          "--ignored",
-          `--exclude-from=${worktreeIncludePath}`,
-          "-z",
-        ],
-        outputPath: selectedPath,
-        signal: params.signal,
-        timeoutMs: params.timeoutMs,
-      }),
-    ]);
-    if (ignoredResult.status === "rejected") {
-      throw ignoredResult.reason;
-    }
-    if (selectedResult.status === "rejected") {
-      throw selectedResult.reason;
-    }
+    await runWorkspaceInventoryCommandToFile({
+      argv: [
+        "git",
+        "-C",
+        params.gitRoot,
+        "ls-files",
+        "--full-name",
+        "--others",
+        "--ignored",
+        `--exclude-from=${worktreeIncludePath}`,
+        "-z",
+      ],
+      outputPath: selectedPath,
+      signal: params.signal,
+      timeoutMs: params.timeoutMs,
+    });
   } else {
-    await Promise.all([
-      fs.writeFile(ignoredPath, "", { mode: 0o600 }),
-      fs.writeFile(selectedPath, "", { mode: 0o600 }),
-    ]);
+    await fs.writeFile(selectedPath, "", { mode: 0o600 });
   }
   await writeEligibleGitFiles({
     gitRoot: params.gitRoot,

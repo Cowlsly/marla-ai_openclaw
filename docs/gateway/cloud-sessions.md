@@ -19,6 +19,16 @@ Sessions can run in three places, and every one of them uses the same session, t
 
 In all remote placements, model inference stays proxied through the Gateway — provider credentials never reach the remote machine — and completed work reconciles back into the session's managed worktree. Both the OpenClaw runtime (`worker-turn`) and Codex (`remote-exec`) can use the same destinations.
 
+## Images and attachments
+
+OpenClaw `worker-turn` sessions accept images, including image-only messages and ordered mixtures of inline and offloaded images. The Gateway hydrates current input and recent replay from its managed media using the same image sanitization, ordering, and history pruning as local sessions. It keeps the canonical transcript and original attachment references; only the worker's input receives remote file paths.
+
+Attachments sent after dispatch are copied into the worker workspace through the authenticated transfer channel. This requires a current node-host installation as well as the worker bundle; update paired devices or the cloud profile's node package before using it. File tools can read their source files, including non-image attachments. Copies do not replace the active workspace or overwrite earlier worker edits to the same attachment. Placement and turn ownership are checked before transfer and launch; an unavailable or oversized attachment produces an error instead of silently dropping the image.
+
+Raw inputs use an OpenClaw-owned directory under `media/inbound/openclaw-staged-<id>/`, with a local Git exclusion. Local and writable sandbox sessions use the same rule. Input copies and edits remain available through workspace reconciliation, worker replacement, and managed-worktree removal and restore, but ordinary Git publication does not include them. To publish an image or document as part of the project, explicitly copy it to an ordinary project path first. Existing tracked files stay project-owned; this does not remove files from earlier commits or undo prior publication.
+
+Attachment staging uses the existing workspace-result transfer limits (25,000 files and 256 MiB total), with a 6 MiB per-file media read limit. Encoded launch, inference, and image-bearing transcript frames must also fit within 25 MiB; base64 encoding counts toward those frame limits. Non-image transcript content and unrelated control traffic retain their 64 KiB limits. Worker turns have no native steering transport: messages received during a turn use the existing queued follow-up path, retaining their images and media metadata.
+
 ## Paired devices: your own hardware as session hosts
 
 Pair any machine with one pasted command, then opt it into session hosting:

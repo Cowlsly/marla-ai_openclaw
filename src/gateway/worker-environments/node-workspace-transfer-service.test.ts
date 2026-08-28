@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { NODE_WORKER_WORKSPACE_EXEC_COMMAND } from "../../infra/node-commands.js";
+import { ensureStagedInputDirectory, stagedInputDirectory } from "../../media/staged-inputs.js";
 import { invokeNodeWorkerSupervisorCommand } from "../../node-host/node-worker-supervisor-commands.js";
 import { NodeWorkerWorkspaceRuntime } from "../../node-host/node-worker-workspace.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
@@ -290,6 +291,71 @@ describe("node workspace transfer service", () => {
         fs.readFile(path.join(downloaded.workspaceDir, "nested", "input.txt"), "utf8"),
       ).resolves.toBe("nested input\n");
       await fs.writeFile(path.join(downloaded.workspaceDir, "result.txt"), "node result\n");
+      const attachmentsRoot = path.join(root, "attachments");
+      const inputDirectory = stagedInputDirectory("a".repeat(64));
+      const attachmentPath = `${inputDirectory}/input-document.txt`;
+      await fs.mkdir(attachmentsRoot);
+      await ensureStagedInputDirectory(attachmentsRoot, inputDirectory);
+      await fs.writeFile(path.join(attachmentsRoot, attachmentPath), "new attachment");
+      let attachmentTurnCurrent = true;
+      const attachments = await service.prepareAttachments({
+        environmentId: "environment-1",
+        localPath: attachmentsRoot,
+        isAuthorized: () => attachmentTurnCurrent,
+      });
+      const attachmentInput = {
+        ...downloadInput,
+        argv: [...downloadInput.argv],
+        transfer: {
+          direction: "download" as const,
+          token: attachments.token,
+          manifestRef: attachments.snapshot.manifestRef,
+          attachments: true as const,
+        },
+      };
+      const collision = path.join(downloaded.workspaceDir, inputDirectory);
+      await fs.mkdir(collision, { recursive: true });
+      await fs.writeFile(path.join(collision, "project.txt"), "existing project file");
+      await expect(runtime.exec(attachmentInput, undefined, { url: gatewayUrl })).rejects.toThrow(
+        "workspace-transfer-failed",
+      );
+      await expect(fs.readFile(path.join(collision, "project.txt"), "utf8")).resolves.toBe(
+        "existing project file",
+      );
+      await expect(fs.stat(path.join(collision, ".gitignore"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await fs.rm(collision, { recursive: true });
+      const staged = await invokeNodeWorkerSupervisorCommand({
+        command: NODE_WORKER_WORKSPACE_EXEC_COMMAND,
+        paramsJSON: JSON.stringify(attachmentInput),
+        workspace: runtime,
+        gatewayUrl,
+      });
+      expect(staged).toMatchObject({ handled: true, ok: true });
+      await expect(
+        fs.readFile(path.join(downloaded.workspaceDir, attachmentPath), "utf8"),
+      ).resolves.toBe("new attachment");
+      await expect(
+        fs.readFile(path.join(downloaded.workspaceDir, "result.txt"), "utf8"),
+      ).resolves.toBe("node result\n");
+      await expect(
+        fs.readFile(path.join(downloaded.workspaceDir, "input.txt"), "utf8"),
+      ).resolves.toBe("gateway input\n");
+      await fs.writeFile(
+        path.join(downloaded.workspaceDir, attachmentPath),
+        "worker attachment edit",
+      );
+      await runtime.exec(attachmentInput, undefined, { url: gatewayUrl });
+      await expect(
+        fs.readFile(path.join(downloaded.workspaceDir, attachmentPath), "utf8"),
+      ).resolves.toBe("worker attachment edit");
+      attachmentTurnCurrent = false;
+      await expect(runtime.exec(attachmentInput, undefined, { url: gatewayUrl })).rejects.toThrow(
+        "workspace-transfer-failed",
+      );
+      service.revoke("environment-1", attachments.token);
+      expect(service.getSnapshot("environment-1", prepared.snapshot.manifestRef)).toBeDefined();
       const writeFaults = injectUploadWriteFaults();
       const persistenceRetry = writeFaults.blockNextRetry();
       const uploadResult = (token: string) =>

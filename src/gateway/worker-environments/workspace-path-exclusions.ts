@@ -1,3 +1,7 @@
+import { isStagedInputPath } from "../../media/staged-inputs.js";
+// Keep a local binding so the predicate can also run in serialized remote scripts.
+const retainedInputPath = isStagedInputPath;
+
 export const DERIVED_WORKSPACE_DIRECTORY_NAMES = [
   "__pycache__",
   ".pytest_cache",
@@ -12,6 +16,9 @@ export const DERIVED_WORKSPACE_FILE_SUFFIXES = [".pyc", ".pyo"] as const;
 // Derived caches must never fence workspace reconciliation. Keep every sync,
 // manifest, divergence, apply, and recovery path on this single predicate.
 export function isDerivedWorkspacePath(relativePath: string): boolean {
+  if (retainedInputPath(relativePath)) {
+    return false;
+  }
   const segments = relativePath.split("/");
   return segments.some(
     (segment) =>

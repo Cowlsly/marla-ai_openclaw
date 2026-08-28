@@ -228,7 +228,8 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
           params: input,
           timeoutMs: remainingMs,
           signal,
-          isDispatchAuthorized: () => isEnvironmentOwner(entry),
+          isDispatchAuthorized: () =>
+            isEnvironmentOwner(entry) && command.isDispatchAuthorized?.() !== false,
         });
       } catch (error) {
         if (

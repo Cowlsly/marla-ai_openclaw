@@ -26,6 +26,7 @@ import {
   type WorkerInferenceTerminalFrame,
   WORKER_INFERENCE_PROTOCOL_FEATURE,
 } from "../../../../packages/gateway-protocol/src/schema/worker-inference.js";
+import { createNoisyPngBuffer } from "../../../../test/helpers/image-fixtures.js";
 import { createTestAdmittedRunContext } from "../../../agents/admitted-run-context.test-support.js";
 import type { SessionPlacementTurnParams } from "../../../agents/session-placement-admission.js";
 import {
@@ -722,6 +723,57 @@ describe("dedicated worker websocket protocol", () => {
       method: "worker.transcript.commit",
     });
     expect(harness.close).not.toHaveBeenCalled();
+  });
+
+  it("admits large image transcript frames without enlarging control or text budgets", async () => {
+    const image = {
+      type: "image",
+      data: createNoisyPngBuffer(256, 256).toString("base64"),
+      mimeType: "image/png",
+    };
+    expect(Buffer.byteLength(image.data)).toBeGreaterThan(64 * 1024);
+    const transcript = {
+      ...TRANSCRIPT_COMMIT,
+      messages: [
+        {
+          role: "toolResult",
+          toolName: "read",
+          toolCallId: "read-image",
+          timestamp: 1,
+          isError: false,
+          content: [image],
+        },
+      ],
+    };
+    const valid = attachHarness();
+    await admit(valid);
+    valid.sendRequest("worker.transcript.commit", transcript);
+    await waitForWorkerProtocol(() => expect(valid.responses).toHaveLength(2));
+    expect(valid.service.commitTranscript).toHaveBeenCalledWith(IDENTITY, transcript);
+    expect(valid.close).not.toHaveBeenCalled();
+    for (const [method, params] of [
+      [
+        "worker.transcript.commit",
+        {
+          ...transcript,
+          messages: [
+            {
+              ...transcript.messages[0],
+              content: [image, { type: "text", text: "x".repeat(64 * 1024) }],
+            },
+          ],
+        },
+      ],
+      ["worker.heartbeat", { runEpoch: 1, extra: image.data }],
+    ] as const) {
+      const oversized = attachHarness();
+      await admit(oversized);
+      oversized.sendRequest(method, params);
+      await waitForWorkerProtocol(() =>
+        expect(oversized.close).toHaveBeenCalledWith(1009, "invalid-frame"),
+      );
+      expect(oversized.service.commitTranscript).not.toHaveBeenCalled();
+    }
   });
 
   it("gates live-event features, schema, and closed errors", async () => {

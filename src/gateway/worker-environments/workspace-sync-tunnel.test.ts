@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { waitForChildClose, waitForPidFile } from "../../../test/helpers/process-wait.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { ensureStagedInputDirectory, stagedInputDirectory } from "../../media/staged-inputs.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { createWorkerTunnelManager } from "./tunnel.js";
 import {
@@ -771,6 +772,10 @@ describe("worker tunnel manager", () => {
       fs.writeFile(path.join(localPath, "ordinary-untracked.txt"), "before ignore\n"),
     ]);
 
+    const inputDirectory = stagedInputDirectory("b".repeat(64));
+    const privateInput = `${inputDirectory}/input-cache.pyc`;
+    await ensureStagedInputDirectory(localPath, inputDirectory);
+    await fs.writeFile(path.join(localPath, privateInput), "raw input bytes");
     const fake = localWorkspaceRunner(remoteHome);
     const { handle } = await startConnectedTunnel(fake, "worker:real-git-sync", 11);
 
@@ -781,6 +786,10 @@ describe("worker tunnel manager", () => {
         generation: 1,
       });
       expect(result.mode).toBe("git");
+      await expect(
+        fs.readFile(path.join(result.remoteWorkspaceDir, privateInput), "utf8"),
+      ).resolves.toBe("raw input bytes");
+      await fs.writeFile(path.join(result.remoteWorkspaceDir, privateInput), "edited input bytes");
       expect(result.manifestRef).toMatch(/^sha256:[a-f0-9]{64}$/u);
       await expect(
         fs.readFile(path.join(result.remoteWorkspaceDir, largeFiles[0] ?? ""), "utf8"),
@@ -848,6 +857,9 @@ describe("worker tunnel manager", () => {
         journal,
       });
       expect(reconciled).toMatchObject({ changed: true });
+      await expect(fs.readFile(path.join(localPath, privateInput), "utf8")).resolves.toBe(
+        "edited input bytes",
+      );
       expect(reconciled.manifestRef).toMatch(/^sha256:[a-f0-9]{64}$/u);
       await reconciled.verifyStable();
       await reconciled.verifyLocalStable();

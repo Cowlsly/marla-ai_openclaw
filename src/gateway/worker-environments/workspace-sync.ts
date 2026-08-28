@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { withTimeout } from "../../infra/fs-safe.js";
+import { STAGED_INPUT_DIRECTORY_PREFIX } from "../../media/staged-inputs.js";
 import type { CommandOptions, SpawnResult } from "../../process/exec.js";
 import { type PreparedWorkerSsh, runWorkerSshCandidates, workerSshCommandOptions } from "./ssh.js";
 import type {
@@ -340,6 +341,7 @@ export function createWorkerWorkspaceActions(
         "--checksum",
         "--delete-delay",
         "--exclude=.git",
+        `--include=/${STAGED_INPUT_DIRECTORY_PREFIX}*/***`,
         ...DERIVED_WORKSPACE_RSYNC_EXCLUDES.map((pattern) => `--exclude=${pattern}`),
         ...(fileListPath ? ["--recursive", "--from0", `--files-from=${fileListPath}`] : []),
         `--rsync-path=${mutationReceiverPath("workspace-root")}`,

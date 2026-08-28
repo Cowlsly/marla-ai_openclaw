@@ -5,6 +5,7 @@ import {
 } from "../../../packages/gateway-protocol/src/schema/worker-inference.js";
 import {
   resolvePreparedRunAdmission,
+  resolveAdmittedRunActiveAssertion,
   type AdmittedRunContext,
 } from "../../agents/admitted-run-context.js";
 import {
@@ -106,6 +107,14 @@ export async function prepareWorkerAgentRuntimeIdentity(
     admittedRunContext: params.turn.admittedRunContext,
     preparedRunAdmission: params.turn.preparedRunAdmission,
   });
+  const assertActive = resolveAdmittedRunActiveAssertion(
+    admittedRunContext,
+    params.turn.abortSignal,
+  );
+  if (!assertActive) {
+    throw new Error("Worker turn has no active admitted execution authority");
+  }
+  assertActive();
   const runtimeIdentity = buildWorkerAgentRuntimeIdentity({ ...params, admittedRunContext });
   // Worker session RPC carries no raw identity token. Bind provenance to the exact
   // host claim before launch so child lineage cannot become bearer authority.
@@ -126,6 +135,7 @@ export async function prepareWorkerAgentRuntimeIdentity(
   return {
     operationalRunInstance: admittedRunContext.operationalRunInstance,
     runtimeIdentity,
+    assertActive,
   };
 }
 
@@ -321,9 +331,6 @@ export function assertSupportedTurn(params: SessionPlacementTurnParams): {
   provider: string;
   model: string;
 } {
-  if (params.images?.length || params.imageOrder?.length) {
-    throw new Error("Cloud worker turns do not yet support current-turn image input");
-  }
   if (params.clientTools?.length) {
     throw new Error("Cloud worker turns do not support client-provided tools");
   }
