@@ -275,6 +275,8 @@ async function loadPluginCliMetadataRegistryWithContext(
     loadOpenClawPluginCliRegistry(
       buildPluginRuntimeLoadOptions(prepared.context, {
         ...loaderOptions,
+        // The prepared record owns reuse; process caching can retain another generation's registrars.
+        cache: false,
         ...(onlyPluginIds && onlyPluginIds.length > 0 ? { onlyPluginIds } : {}),
       }),
     ),
