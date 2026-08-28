@@ -97,19 +97,9 @@ const qaFlowScenarioExecutionSchema = z
     suiteIsolation: z.literal("isolated").optional(),
     isolationReason: z.string().trim().min(1).optional(),
     transportPolicy: qaScenarioTransportPolicySchema.optional(),
-    deadlineOwner: z.literal("provider").optional(),
     config: qaScenarioConfigSchema.optional(),
   })
-  .extend(qaScenarioModuleFlow.executionShape)
-  .superRefine((execution, ctx) => {
-    if (execution.deadlineOwner === "provider" && execution.timeoutMs !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["timeoutMs"],
-        message: "provider-owned deadlines cannot declare a scenario timeout",
-      });
-    }
-  });
+  .extend(qaScenarioModuleFlow.executionShape);
 
 const qaTestFileScenarioExecutionBaseSchema = z.object({
   summary: z.string().trim().min(1).optional(),

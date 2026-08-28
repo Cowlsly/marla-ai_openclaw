@@ -93,6 +93,7 @@ describe("Matrix QA Lab scenario flows", () => {
       }
       expect(scenario.execution.channel, scenario.id).toBe("matrix");
       expect(scenario.execution.retryCount, scenario.id).toBe(0);
+      expect(scenario.execution.timeoutMs, scenario.id).toBeGreaterThan(0);
       expect(scenario.execution.flow?.steps.at(-1)?.detailsExpr, scenario.id).toBe(
         "result.details ?? (result.artifacts ? JSON.stringify(result.artifacts, null, 2) : undefined)",
       );
@@ -115,22 +116,6 @@ describe("Matrix QA Lab scenario flows", () => {
       );
       expect(readModuleBinding(scenario).callAction.args).toEqual([{ expr: "scenarioContext" }]);
     }
-  });
-
-  it("keeps provider-owned deadlines outside the scenario lifecycle", () => {
-    let providerDeadlineScenarioCount = 0;
-    for (const scenario of scenarios) {
-      if (scenario.execution.kind !== "flow") {
-        continue;
-      }
-      if (scenario.execution.deadlineOwner === "provider") {
-        providerDeadlineScenarioCount += 1;
-        expect(scenario.execution.timeoutMs, scenario.id).toBeUndefined();
-      } else {
-        expect(scenario.execution.timeoutMs, scenario.id).toBeGreaterThan(0);
-      }
-    }
-    expect(providerDeadlineScenarioCount).toBeGreaterThan(0);
   });
 
   it("applies the portable thread override through Matrix flow preparation", () => {
