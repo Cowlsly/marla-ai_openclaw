@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import OpenClawChatUI
 import OpenClawProtocol
@@ -1084,8 +1083,9 @@ private func assertConfigLookupCannotRecreateRoute(
         try Data(#"{"gateway":{"mode":"local","port":\#(port)}}"#.utf8).write(to: configURL)
         defer { try? FileManager.default.removeItem(at: isolatedState) }
 
+        // Profiles and their reserved ports live for the process; a temporary
+        // profile here would permanently change later tests' ownership checks.
         return try await TestIsolation.withEnvValues([
-            "OPENCLAW_PROFILE": "autoqa-185-tests",
             "OPENCLAW_CONFIG_PATH": configURL.path,
             "OPENCLAW_STATE_DIR": isolatedState.path,
         ]) {
@@ -1243,7 +1243,7 @@ private func assertConfigLookupCannotRecreateRoute(
                     deviceAuthGatewayID: route.owner)
             },
             supportsSharedEndpointRecovery: false,
-            activationBindingKeyProvider: { SymmetricKey(data: Data(repeating: 1, count: 32)) },
+            activationBindingKeyProvider: { nil },
             sessionBox: WebSocketSessionBox(session: session))
         _ = try await connection.request(
             method: "health",
