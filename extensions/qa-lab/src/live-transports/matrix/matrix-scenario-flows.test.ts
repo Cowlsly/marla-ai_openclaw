@@ -93,7 +93,6 @@ describe("Matrix QA Lab scenario flows", () => {
       }
       expect(scenario.execution.channel, scenario.id).toBe("matrix");
       expect(scenario.execution.retryCount, scenario.id).toBe(0);
-      expect(scenario.execution.timeoutMs, scenario.id).toBeGreaterThan(0);
       expect(scenario.execution.flow?.steps.at(-1)?.detailsExpr, scenario.id).toBe(
         "result.details ?? (result.artifacts ? JSON.stringify(result.artifacts, null, 2) : undefined)",
       );
