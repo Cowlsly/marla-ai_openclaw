@@ -293,16 +293,7 @@ function scanTrajectoryRows(params: {
   return changedRows;
 }
 
-type MediaSourceVersion = {
-  dataVersion: number;
-  trajectoryBytes: number;
-  trajectoryRows: number;
-  transcriptBytes: number;
-  transcriptCreatedAt: string;
-  transcriptRows: number;
-};
-
-function readMediaSourceVersion(database: DatabaseSync): MediaSourceVersion {
+function readMediaSourceVersion(database: DatabaseSync) {
   const dataVersionRow = database.prepare("PRAGMA data_version").get();
   const counts = database
     .prepare(
@@ -317,19 +308,19 @@ function readMediaSourceVersion(database: DatabaseSync): MediaSourceVersion {
   const number = (value: unknown): number =>
     typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : 0;
   const count = (key: string): number => number(isRecord(counts) ? counts[key] : undefined);
-  const text = (key: string): string => {
-    const value = isRecord(counts) ? counts[key] : undefined;
-    return typeof value === "string" ? value : "0";
-  };
   return {
     dataVersion: number(isRecord(dataVersionRow) ? dataVersionRow.data_version : undefined),
     trajectoryBytes: count("trajectory_bytes"),
     trajectoryRows: count("trajectory_rows"),
     transcriptBytes: count("transcript_bytes"),
-    transcriptCreatedAt: text("transcript_created_at"),
+    transcriptCreatedAt: String(
+      (isRecord(counts) ? counts.transcript_created_at : undefined) ?? "0",
+    ),
     transcriptRows: count("transcript_rows"),
   };
 }
+
+type MediaSourceVersion = ReturnType<typeof readMediaSourceVersion>;
 
 function mediaSourceDriftMessage(
   pathname: string,
