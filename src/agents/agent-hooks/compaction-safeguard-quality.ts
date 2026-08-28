@@ -20,8 +20,10 @@ const REQUIRED_SUMMARY_SECTIONS = [
   "## Exact identifiers",
 ] as const;
 const QUALITY_PROTECTED_SECTION_START = 3;
+const PENDING_ASK_SECTION_INDEX = 3;
 const EXACT_IDENTIFIERS_SECTION_INDEX = 4;
 const MAX_PROTECTED_SECTION_CONTENT_SHARE = 0.25;
+const LATEST_USER_REQUEST_CONTEXT_LABEL = "Latest user request context:";
 const STRICT_EXACT_IDENTIFIERS_INSTRUCTION =
   "For ## Exact identifiers, preserve literal values exactly as seen (IDs, URLs, file paths, ports, hashes, dates, times).";
 const POLICY_OFF_EXACT_IDENTIFIERS_INSTRUCTION =
@@ -157,16 +159,30 @@ export function createSummaryQualityRetentionPlan(
   const marker = truncatedMarker.trim();
   // Protected tails render after each section's optional content so the audit
   // facts survive regardless of how much model text the budget keeps.
-  const modelAskSectionIndex = contents.findIndex((content) =>
-    hasAskOverlap(content, params.latestAsk),
-  );
-  const protectedAskSectionIndex = Math.max(modelAskSectionIndex, 0);
+  // Weak token overlap is sufficient for the final presence audit, but not for semantic
+  // ownership: incidental words in Decisions/Constraints must not classify an omitted ask.
+  // Prefer explicit pending ownership, then preserve an exact source context in the section
+  // selected by the model. Otherwise fail safe to Pending user asks because no trustworthy
+  // completion state exists.
+  const exactAskSectionIndex = requiredAskContext
+    ? contents[PENDING_ASK_SECTION_INDEX]?.includes(requiredAskContext)
+      ? PENDING_ASK_SECTION_INDEX
+      : contents.findIndex((content) => content.includes(requiredAskContext))
+    : -1;
+  const modelAskSectionIndex =
+    exactAskSectionIndex >= 0
+      ? exactAskSectionIndex
+      : hasAskOverlap(contents[PENDING_ASK_SECTION_INDEX] ?? "", params.latestAsk)
+        ? PENDING_ASK_SECTION_INDEX
+        : -1;
+  const protectedAskSectionIndex =
+    modelAskSectionIndex >= 0 ? modelAskSectionIndex : PENDING_ASK_SECTION_INDEX;
   // Response termination cannot prove task completion. Preserve the summarizer's
   // section choice instead of moving the request between completed and pending state.
   const protectedAskContext = requiredAskContext
     ? modelAskSectionIndex >= 0
       ? requiredAskContext
-      : `Latest user request context:\n${requiredAskContext}`
+      : `${LATEST_USER_REQUEST_CONTEXT_LABEL}\n${requiredAskContext}`
     : "";
   const protectedTails = REQUIRED_SUMMARY_SECTIONS.map((_, index) =>
     index === protectedAskSectionIndex
@@ -179,7 +195,7 @@ export function createSummaryQualityRetentionPlan(
     summaryIncludesIdentifier(summary, identifier),
   );
   const bodyHasLatestAsk = hasAskOverlap(summary, params.latestAsk);
-  const bodyHasRequiredAskContext = !requiredAskContext || summary.includes(requiredAskContext);
+  const bodyHasRequiredAskContext = !requiredAskContext || modelAskSectionIndex >= 0;
   const renderSections = (sectionContents: string[]) =>
     REQUIRED_SUMMARY_SECTIONS.map((heading, index) => {
       const content = sectionContents[index];
@@ -199,7 +215,13 @@ export function createSummaryQualityRetentionPlan(
       );
       return [optional, ...missing].filter(Boolean).join("\n");
     }
-    return [optional, tail].filter(Boolean).join("\n");
+    const retainedOptional =
+      index === PENDING_ASK_SECTION_INDEX &&
+      modelAskSectionIndex < 0 &&
+      /^(?:none|none captured|no pending asks)[.!]?$/iu.test(optional)
+        ? ""
+        : optional;
+    return [retainedOptional, tail].filter(Boolean).join("\n");
   };
   // Reserve every heading/content/tail separator up front so trimmed optional
   // text can never push the rendered artifact past `maxChars`.
@@ -225,7 +247,10 @@ export function createSummaryQualityRetentionPlan(
   return {
     minimumChars: minimumSummary.length,
     needsRebuild: (maxChars) =>
-      !bodyHasLatestAsk || !bodyHasIdentifiers || !protectedWithinCap(maxChars),
+      !bodyHasLatestAsk ||
+      !bodyHasRequiredAskContext ||
+      !bodyHasIdentifiers ||
+      !protectedWithinCap(maxChars),
     render(maxChars) {
       if (
         summary.length <= maxChars &&
@@ -424,6 +449,16 @@ export function auditSummaryQuality(params: {
   }
   if (!hasAskOverlap(params.summary, params.latestAsk)) {
     reasons.push("latest_user_ask_not_reflected");
+  }
+  if (params.structuralSummary.includes(LATEST_USER_REQUEST_CONTEXT_LABEL)) {
+    const contents = parseRequiredSummarySectionContents(params.structuralSummary);
+    const pendingAsks = contents?.[PENDING_ASK_SECTION_INDEX] ?? "";
+    if (
+      !pendingAsks.includes(LATEST_USER_REQUEST_CONTEXT_LABEL) ||
+      !hasAskOverlap(pendingAsks, params.latestAsk)
+    ) {
+      reasons.push("latest_user_ask_context_not_pending");
+    }
   }
   return { ok: reasons.length === 0, reasons };
 }

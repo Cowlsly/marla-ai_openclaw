@@ -1726,7 +1726,11 @@ describe("truncateOversizedToolResultsInSession", () => {
       projectionState,
     });
 
-    expect(result.truncated).toBe(true);
+    expect(result).toEqual({
+      truncated: false,
+      truncatedCount: 0,
+      reason: "no oversized or aggregate tool results",
+    });
     const activeToolResult = SessionManager.open(scope)
       .getBranch()
       .find((entry) => entry.type === "message" && entry.message.role === "toolResult");

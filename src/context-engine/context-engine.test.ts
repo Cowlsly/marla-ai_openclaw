@@ -719,8 +719,7 @@ describe("Default engine selection", () => {
   it("preserves native compaction watchdog ownership through default resolution", async () => {
     const engine = await resolveContextEngine();
 
-    // oxlint-disable-next-line typescript/unbound-method -- the identity predicate never invokes compact.
-    expect(isRuntimeCompactionDelegate(engine.compact)).toBe(true);
+    expect(isRuntimeCompactionDelegate(Reflect.get(engine, "compact", engine))).toBe(true);
   });
 
   it("resolveContextEngine() with config contextEngine='legacy' returns legacy engine", async () => {
@@ -1542,6 +1541,7 @@ describe("Invalid engine fallback", () => {
     expect(engine.info.id).toBe("legacy");
     expect(engine.info.ownsCompaction).toBeUndefined();
     expect(resolveContextEngineOwnerPluginId(engine)).toBeUndefined();
+    expect(isRuntimeCompactionDelegate(Reflect.get(engine, "compact", engine))).toBe(true);
     expect(assemble).toHaveBeenCalledTimes(1);
   });
 
@@ -1632,6 +1632,7 @@ describe("Invalid engine fallback", () => {
     expect(engine.info.id).toBe("legacy");
     expect(engine.info.ownsCompaction).toBeUndefined();
     expect(resolveContextEngineOwnerPluginId(engine)).toBeUndefined();
+    expect(isRuntimeCompactionDelegate(Reflect.get(engine, "compact", engine))).toBe(true);
     expect(compact).toHaveBeenCalledTimes(1);
   });
 

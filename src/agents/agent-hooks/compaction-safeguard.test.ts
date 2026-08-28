@@ -1545,6 +1545,31 @@ describe("compaction-safeguard recent-turn preservation", () => {
     expect(quality.reasons).toContain("latest_user_ask_not_reflected");
   });
 
+  it("rejects deterministic source context outside pending asks", () => {
+    const latestAsk = "report whether the deployment is ready";
+    const quality = auditSummaryQuality({
+      summary: [
+        "## Decisions",
+        `Latest user request context:\n${latestAsk}`,
+        "## Open TODOs",
+        "None.",
+        "## Constraints/Rules",
+        "Preserve exact context.",
+        "## Pending user asks",
+        "None.",
+        "## Exact identifiers",
+        "None.",
+      ].join("\n"),
+      identifiers: [],
+      latestAsk,
+    });
+
+    expect(quality).toEqual({
+      ok: false,
+      reasons: ["latest_user_ask_context_not_pending"],
+    });
+  });
+
   it("clamps quality-guard retries into a safe range", () => {
     expect(resolveQualityGuardMaxRetries(undefined)).toBe(1);
     expect(resolveQualityGuardMaxRetries(-1)).toBe(0);
@@ -2449,7 +2474,7 @@ describe("compaction-safeguard recent-turn preservation", () => {
     const latestAsk = "report whether the deployment is ready";
     const generatedSummary = [
       "## Decisions",
-      "The deployment remains paused.",
+      "The deployment is ready for inspection.",
       "## Open TODOs",
       "Check the deployment status.",
       "## Constraints/Rules",
@@ -2479,7 +2504,9 @@ describe("compaction-safeguard recent-turn preservation", () => {
     const { result } = await runCompactionScenario({ sessionManager, event, apiKey: "test-key" });
 
     const summary = expectCompactionResult(result).summary;
-    expect(summary).toContain(`Latest user request context:\n${latestAsk}`);
+    expect(summary).toContain(`## Pending user asks\nLatest user request context:\n${latestAsk}`);
+    expect(summary).not.toContain("## Pending user asks\nNone.");
+    expect(summary).not.toContain(`## Decisions\nLatest user request context:\n${latestAsk}`);
     expect(auditSummaryQuality({ summary, identifiers: [], latestAsk })).toEqual({
       ok: true,
       reasons: [],

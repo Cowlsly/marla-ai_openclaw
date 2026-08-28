@@ -1285,10 +1285,9 @@ function truncateOversizedToolResultsInExistingSessionManager(params: {
       params.aggregateMaxCharsOverride,
       params.projectionState,
     );
-    const truncatedCount = projected.messages.reduce(
-      (count, message, index) => count + (message === messages[index] ? 0 : 1),
-      0,
-    );
+    // Recovery progress is measured against the frozen provider projection, not durable rows.
+    // Reusing identical projected bytes must not trigger another provider retry.
+    const truncatedCount = projected.truncatedCount;
     return {
       truncated: truncatedCount > 0,
       truncatedCount,
