@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   createReplyOperation,
   expireStaleReplyOperation,
@@ -256,7 +256,15 @@ describe("embedded run retry dispatch", () => {
     },
   );
 
-  it.each(["user", "restart", "stale", "superseded", "upstream"] as const)(
+  it.each([
+    "user",
+    "restart",
+    "stale",
+    "superseded",
+    "upstream",
+    "native-restart",
+    "native-superseded",
+  ] as const)(
     "retains %s cancellation ownership through the deferred native lifecycle",
     async (source) => {
       const input = makeDispatchInput({}, createEmbeddedRunReplayState());
@@ -298,7 +306,7 @@ describe("embedded run retry dispatch", () => {
         setPromptError: vi.fn(),
       };
       let external: ReturnType<typeof createEmbeddedAttemptExternalAbortController> | undefined;
-      let onAttemptAbort: ReturnType<typeof vi.fn> | undefined;
+      let onAttemptAbort: Mock<NonNullable<EmbeddedRunAttemptParams["onAttemptAbort"]>> | undefined;
       let firstNativeReason: unknown;
       mocks.runAttempt.mockImplementationOnce(async (attempt: EmbeddedRunAttemptParams) => {
         external = createEmbeddedAttemptExternalAbortController({
@@ -308,12 +316,11 @@ describe("embedded run retry dispatch", () => {
           runId: attempt.runId,
           state,
         });
-        let prepared: ReturnType<typeof prepareEmbeddedAttemptStream> | undefined;
         const abortRun = createEmbeddedAttemptRunAbort({
           abortActiveSession,
           activeSession: { abortCompaction: vi.fn(), isCompacting: false },
           attempt,
-          getQueueHandle: () => prepared?.queueHandle,
+          getQueueHandle: () => prepared.queueHandle,
           isProbeSession: true,
           log: { warn: vi.fn() },
           runAbortController,
@@ -323,7 +330,7 @@ describe("embedded run retry dispatch", () => {
         external.arm();
         // Observe the callback minted by real dispatch; do not reproduce its abort policy.
         onAttemptAbort = vi.fn(attempt.onAttemptAbort);
-        prepared = prepareEmbeddedAttemptStream({
+        const prepared = prepareEmbeddedAttemptStream({
           attempt: { ...attempt, onAttemptAbort },
           activeSession: { agent: {}, isStreaming: true } as never,
           hookRunner: undefined as never,
@@ -372,9 +379,19 @@ describe("embedded run retry dispatch", () => {
           case "upstream":
             upstream.abort(upstreamReason);
             break;
+          case "native-restart":
+            // Lifecycle eviction aborts the native owner before a reply result exists.
+            prepared.queueHandle.abort("restart");
+            break;
+          case "native-superseded":
+            // Writer replacement reaches this native handle without first aborting the reply owner.
+            prepared.queueHandle.cancel("superseded");
+            break;
         }
         firstNativeReason = runAbortController.signal.reason;
-        prepared.queueHandle.cancel(source === "restart" ? "user_abort" : "restart");
+        prepared.queueHandle.cancel(
+          source === "restart" || source === "native-restart" ? "user_abort" : "restart",
+        );
         expect(runAbortController.signal.reason).toBe(firstNativeReason);
         throw firstNativeReason;
       });
@@ -395,9 +412,13 @@ describe("embedded run retry dispatch", () => {
         expect(state.markAborted).toHaveBeenCalledOnce();
         expect(state.markTimedOut).not.toHaveBeenCalled();
         expect(abortActiveSession).toHaveBeenCalledExactlyOnceWith(firstNativeReason);
-        if (source === "restart") {
+        if (source === "restart" || source === "native-restart") {
           expect(isAgentRunRestartAbortReason(firstNativeReason)).toBe(true);
-        } else if (source === "stale" || source === "superseded") {
+        } else if (
+          source === "stale" ||
+          source === "superseded" ||
+          source === "native-superseded"
+        ) {
           expect(isAgentRunSupersededAbortReason(firstNativeReason)).toBe(true);
         } else if (source === "upstream") {
           expect(firstNativeReason).toBe(upstreamReason);
@@ -408,9 +429,9 @@ describe("embedded run retry dispatch", () => {
             : {
                 kind: "aborted",
                 code:
-                  source === "restart"
+                  source === "restart" || source === "native-restart"
                     ? "aborted_for_restart"
-                    : source === "superseded"
+                    : source === "superseded" || source === "native-superseded"
                       ? "aborted_for_supersession"
                       : "aborted_by_user",
               },

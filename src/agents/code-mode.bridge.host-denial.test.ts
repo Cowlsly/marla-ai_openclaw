@@ -37,6 +37,7 @@ import {
   testing,
 } from "./code-mode.test-support.js";
 import { consumeTrustedToolNoStartError } from "./tool-result-error.js";
+import * as toolSearchCatalog from "./tool-search-catalog.js";
 import { createToolTerminalObserver } from "./tool-terminal-outcome.js";
 import { jsonResult, ToolInputError } from "./tools/common.js";
 import * as gatewayTool from "./tools/gateway.js";
@@ -199,25 +200,35 @@ describe("Code Mode subscribed host denial", () => {
         };
       });
       const ownedExecutions: Promise<unknown>[] = [];
-      const createPreparer = toolExecutionPreparer.createInternalExecutionPreparer;
-      const preparerSpy = vi
-        .spyOn(toolExecutionPreparer, "createInternalExecutionPreparer")
-        .mockImplementation((startExecution) =>
-          createPreparer((...args) => {
-            // Subscriber cancellation can settle before the actual wrapper's cleanup.
-            // Retain its exact promise so no continuation outlives this fixture.
-            const execution = startExecution(...args);
-            ownedExecutions.push(execution);
-            void execution.catch(() => undefined);
-            return execution;
-          }),
-        );
-      let harness: ReturnType<typeof createHostHarness>;
-      try {
-        harness = createHostHarness({ name: `hook-${change}` });
-      } finally {
-        preparerSpy.mockRestore();
-      }
+      const harness = createHostHarness({ name: `hook-${change}` });
+      const prepareCatalogTool = toolSearchCatalog.prepareToolSearchCatalogExecutionTool;
+      const catalogSpy = vi.spyOn(toolSearchCatalog, "prepareToolSearchCatalogExecutionTool");
+      catalogSpy.mockImplementation((entry, options) => {
+        if (entry.tool !== harness.shell) {
+          return prepareCatalogTool(entry, options);
+        }
+        // Dispatch rebuilds this wrapper; construction-time observation misses it.
+        // Restore both observers synchronously, retaining only the real execution promise.
+        const createPreparer = toolExecutionPreparer.createInternalExecutionPreparer;
+        const preparerSpy = vi
+          .spyOn(toolExecutionPreparer, "createInternalExecutionPreparer")
+          .mockImplementation((startExecution) =>
+            createPreparer((...args) => {
+              // Subscriber cancellation can settle before the actual wrapper's cleanup.
+              // Retain its exact promise so no continuation outlives this fixture.
+              const execution = startExecution(...args);
+              ownedExecutions.push(execution);
+              void execution.catch(() => undefined);
+              return execution;
+            }),
+          );
+        try {
+          return prepareCatalogTool(entry, options);
+        } finally {
+          preparerSpy.mockRestore();
+          catalogSpy.mockRestore();
+        }
+      });
       if (change === "repair") {
         const execTool = expectDefined(harness.tools[0], "outer exec");
         const execute = execTool.execute;
@@ -270,6 +281,7 @@ describe("Code Mode subscribed host denial", () => {
           change === "deny" || change === "invalid",
         );
       } finally {
+        catalogSpy.mockRestore();
         harness.runAbortController.abort(new Error("host hook test cleanup"));
         releaseHook.resolve();
         harness.dispose();

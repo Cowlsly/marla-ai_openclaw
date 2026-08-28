@@ -469,6 +469,12 @@ describe("Gateway terminal cancellation", () => {
         }
         expect(serverErrors).toEqual([]);
         recordTelegramWire(`disposition:${runA}:${runB}`);
+        expect(sends.map((send) => ({ chatId: String(send.chat_id), text: send.text }))).toEqual(
+          Array.from({ length: requestOffset + 2 }, (_, index) => ({
+            chatId: CHAT_ID,
+            text: `TERMINAL_REPLY_${index}`,
+          })),
+        );
       }
     } catch (error) {
       recordTelegramWire("failure");
