@@ -4,12 +4,15 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import {
+  invalidateChatMetadataStore,
   peekChatMetadata,
   beginChatMetadataPublication,
   type ChatMetadataResult,
 } from "../lib/chat/chat-metadata-store.ts";
+import { makeChatHost } from "../pages/chat/chat-host.test-support.ts";
 import type { ChatPageHost } from "../pages/chat/chat-state-host.ts";
 import {
+  applySelectedChatAgent,
   refreshChatMetadata,
   retireChatMetadataRequests,
 } from "../pages/chat/chat-state-refresh.ts";
@@ -139,4 +142,41 @@ it("invalidates chat metadata on config changes and same-client disconnects", ()
   beginChatMetadataPublication(client, { agentId: "main" }).publish({ commands: [], models: [] });
   shell.synchronizeGateway({ ...connected, phase: "reconnecting" });
   expect(peekChatMetadata(client, { agentId: "main" })).toBeUndefined();
+});
+
+it("rebinds global chat metadata immediately on agent selection and follows later invalidation", async () => {
+  const model = { id: "model", name: "Model", provider: "openai" };
+  let ready = false;
+  const request = vi.fn(async (_method: string, params?: { agentId?: string }) => ({
+    commands: [],
+    models: [{ ...model, available: params?.agentId === "main" && ready }],
+  }));
+  const client = { request } as unknown as GatewayBrowserClient;
+  const state = makeChatHost({ client }) as ChatPageHost;
+  state.connected = true;
+  state.sessionKey = "global";
+  state.assistantAgentId = "work";
+  state.chatMessage = "Keep this draft";
+  state.chatError = "Keep this error";
+  const messages = state.chatMessages;
+  try {
+    await refreshChatMetadata(state);
+    expect(state.chatModelCatalog[0]?.available).toBe(false);
+    applySelectedChatAgent(state, "main");
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenLastCalledWith("chat.metadata", {
+        agentId: "main",
+        sessionKey: "global",
+      }),
+    );
+    ready = true;
+    invalidateChatMetadataStore(client);
+    await vi.waitFor(() => expect(state.chatModelCatalog[0]?.available).toBe(true));
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(state.chatMessage).toBe("Keep this draft");
+    expect(state.chatError).toBe("Keep this error");
+    expect(state.chatMessages).toBe(messages);
+  } finally {
+    retireChatMetadataRequests(state);
+  }
 });
