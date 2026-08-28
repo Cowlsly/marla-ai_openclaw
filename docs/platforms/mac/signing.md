@@ -17,7 +17,7 @@ title: "macOS signing"
 - `CODESIGN_TIMESTAMP=auto` (default) enables trusted timestamps for Developer ID Application signatures selected by name or certificate hash. Set `on`/`off` to force either way.
 - Stamps Info.plist with `OpenClawBuildTimestamp` (ISO8601 UTC) and `OpenClawGitCommit` (short hash, `unknown` if unavailable) so the About tab can show build, git, and debug/release channel.
 - Runs a Team ID audit after signing and fails if any Mach-O inside the bundle has a different Team ID. Set `SKIP_TEAM_ID_CHECK=1` to bypass.
-- Signs the private worker's Node executables and native addons before sealing the app. Worker executables receive JIT memory entitlements; native libraries retain library validation and must share the app's signing identity. Packaging verifies each requested architecture's native capabilities and worker readiness in temporary state before and after signing.
+- Signs the private worker's native code before sealing the app. Only the worker's `bin/node` and the Claude Agent SDK's packaged `claude` runtime executables receive JIT memory entitlements; other native helpers and libraries are plain-signed, with library validation retained and the app's signing identity required. Packaging verifies each requested architecture's native capabilities and worker readiness in temporary state before and after signing.
 
 ## Usage
 

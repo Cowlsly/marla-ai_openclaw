@@ -414,7 +414,14 @@ if [[ -d "$WORKER_ROOT" ]]; then
   while IFS= read -r -d '' worker_file; do
     worker_kind="$(/usr/bin/file -b "$worker_file")"
     if [[ "$worker_kind" == *Mach-O* ]]; then
-      if [[ "$worker_kind" == *executable* ]]; then
+      worker_relative="${worker_file#"$WORKER_ROOT"/}"
+      # Node and the SDK's standalone Bun CLI own JS execution. Other native
+      # helpers must not inherit JIT permissions merely because they execute.
+      if [[ "$worker_kind" == *executable* && (
+        "$worker_relative" == arm64/bin/node || "$worker_relative" == x86_64/bin/node ||
+        "$worker_relative" == */node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude ||
+        "$worker_relative" == */node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/claude
+      ) ]]; then
         sign_item "$worker_file" "$ENT_TMP_NODE"
       else
         sign_plain_item "$worker_file"
