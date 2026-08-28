@@ -7,6 +7,7 @@ import {
 } from "openclaw/plugin-sdk/llm";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
 import { steerActiveSessionWithOptionalDeliveryWait } from "../embedded-agent-runner/run/attempt-queue-message.js";
@@ -14,12 +15,16 @@ import type { AgentTool } from "../runtime/index.js";
 import {
   createAssistant,
   createAssistantResultStream,
+  createAutoCompactionSettings,
   createTestSession,
   registerAgentSessionLoopTestLifecycle,
   streamMocks,
   testModel,
 } from "./agent-session-loop-correctness.test-support.js";
-import { createResourceLoader } from "./agent-session-loop-resource-loader.test-support.js";
+import {
+  createCompactionHandlers,
+  createResourceLoader,
+} from "./agent-session-loop-resource-loader.test-support.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/types.js";
 import { SettingsManager } from "./settings-manager.js";
@@ -72,43 +77,277 @@ function mockAbortableQueuedRun() {
 }
 
 describe("AgentSession queue and next-turn lifecycle correctness", () => {
-  it("drains a follow-up queued by an agent-end handler", async () => {
+  it.each(["continue", "clear", "successor"] as const)(
+    "settles only its owned post-compaction continuation (%s)",
+    async (action) => {
+      const settled = vi.fn();
+      const releaseSuccessor = createDeferred();
+      const sessionRef: { current?: AgentSession } = {};
+      const handlers = createCompactionHandlers();
+      let queued = false;
+      handlers.set("agent_end", [
+        async () => {
+          if (!queued) {
+            queued = true;
+            await sessionRef.current?.followUp("post-compaction pending input");
+          }
+        },
+      ]);
+      handlers.set("agent_settled", [async () => settled()]);
+      const requests: Array<{ context: Context; signal: AbortSignal | undefined }> = [];
+      streamMocks.streamSimple.mockImplementation(
+        (activeModel: Model, context: Context, options?: SimpleStreamOptions) => {
+          const requestIndex = requests.length;
+          requests.push({ context, signal: options?.signal });
+          const answer = createAssistant(
+            activeModel,
+            [{ type: "text", text: `completed answer ${requestIndex}` }],
+            "stop",
+            requestIndex === 0 ? 100 : 1,
+          );
+          if (action !== "successor" || requestIndex === 0) {
+            return createAssistantResultStream(answer);
+          }
+          const stream = createAssistantMessageEventStream();
+          void releaseSuccessor.promise.then(() => {
+            stream.push({ type: "done", reason: "stop", message: answer });
+            stream.end();
+          });
+          return stream;
+        },
+      );
+      const { session } = await createTestSession({
+        settingsManager: createAutoCompactionSettings(),
+        resourceLoader: createResourceLoader(handlers),
+      });
+      sessionRef.current = session;
+      let observer: Promise<void> | undefined;
+      let successor: Promise<void> | undefined;
+      let cleared: ReturnType<AgentSession["clearQueue"]> | undefined;
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type !== "compaction_end" || event.outcome.status !== "completed" || observer) {
+          return;
+        }
+        observer = (async () => {
+          // Compaction publishes its queue decision before async observers finish.
+          await Promise.resolve();
+          if (action !== "continue") {
+            cleared = session.clearQueue();
+          }
+          if (action === "successor") {
+            successor = session.agent.prompt("independent successor input");
+          }
+        })();
+      });
+      try {
+        const failure = await session.prompt("initial owned input").then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await observer;
+        expect(observer).toBeDefined();
+        expect(JSON.stringify(requests[0]?.context.messages)).toContain("initial owned input");
+        if (action === "continue") {
+          expect(failure).toBeUndefined();
+          expect(requests).toHaveLength(2);
+          expect(JSON.stringify(requests[1]?.context.messages)).toContain(
+            "post-compaction pending input",
+          );
+          expect(session.isStreaming).toBe(false);
+        } else {
+          expect(cleared).toEqual({ steering: [], followUp: ["post-compaction pending input"] });
+          expect(failure).toBeInstanceOf(Error);
+          if (action === "clear") {
+            expect(failure).toMatchObject({ name: "TranscriptNotContinuableError" });
+            expect(requests).toHaveLength(1);
+            expect(session.isStreaming).toBe(false);
+            expect(session.agent.signal).toBeUndefined();
+          } else {
+            expect(String(failure)).toContain("already processing");
+            await vi.waitFor(() => expect(requests).toHaveLength(2));
+            expect(JSON.stringify(requests[1]?.context.messages)).toContain(
+              "independent successor input",
+            );
+            expect(session.isStreaming).toBe(true);
+            expect(session.agent.signal).toBe(requests[1]?.signal);
+            expect(requests[1]?.signal?.aborted).toBe(false);
+          }
+        }
+        expect(session.agent.hasQueuedMessages()).toBe(false);
+        expect(settled).toHaveBeenCalledTimes(action === "successor" ? 0 : 1);
+      } finally {
+        unsubscribe();
+        releaseSuccessor.resolve();
+        session.agent.abort();
+        await Promise.allSettled([
+          ...(observer ? [observer] : []),
+          ...(successor ? [successor] : []),
+        ]);
+        await session.agent.waitForIdle();
+      }
+    },
+  );
+
+  it("does not consume another active run's handoff when a concurrent prompt is rejected", async () => {
+    const firstPreflightStarted = createDeferred();
+    const releaseFirstPreflight = createDeferred();
+    const terminalStarted = createDeferred();
+    const releaseTerminal = createDeferred();
     const sessionRef: { current?: AgentSession } = {};
-    let queued = false;
-    const lifecycleEvents: string[] = [];
+    let preflights = 0;
+    let handedOff = false;
+    const settled = vi.fn();
     const handlers = new Map<string, Array<(...args: unknown[]) => Promise<unknown>>>([
+      [
+        "before_agent_start",
+        [
+          async () => {
+            if (++preflights === 1) {
+              firstPreflightStarted.resolve();
+              await releaseFirstPreflight.promise;
+            }
+          },
+        ],
+      ],
+      [
+        "turn_end",
+        [
+          async () => {
+            if (!handedOff) {
+              handedOff = true;
+              await sessionRef.current?.followUp("owned pending input");
+              sessionRef.current?.agent.abort({ turnHandoff: true });
+            }
+          },
+        ],
+      ],
       [
         "agent_end",
         [
           async () => {
-            lifecycleEvents.push("agent_end");
-            if (!queued) {
-              queued = true;
-              await sessionRef.current?.followUp("queued after end");
-            }
-            return undefined;
+            terminalStarted.resolve();
+            await releaseTerminal.promise;
           },
         ],
       ],
-      ["agent_settled", [async () => lifecycleEvents.push("agent_settled")]],
+      ["agent_settled", [async () => settled()]],
     ]);
     const requests: Context[] = [];
     streamMocks.streamSimple.mockImplementation((activeModel: Model, context: Context) => {
       requests.push(context);
       return createAssistantResultStream(
-        createAssistant(activeModel, [{ type: "text", text: `answer ${requests.length}` }]),
+        createAssistant(activeModel, [{ type: "text", text: "active owner response" }]),
       );
     });
     const { session } = await createTestSession({ resourceLoader: createResourceLoader(handlers) });
     sessionRef.current = session;
+    const rejected = session.prompt("rejected contender").then(
+      () => undefined,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    let active: Promise<void> | undefined;
+    try {
+      await firstPreflightStarted.promise;
+      active = session.prompt("active owner");
+      await terminalStarted.promise;
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0]?.messages)).toContain("active owner");
+      const activeSignal = session.agent.signal;
+      expect(activeSignal?.aborted).toBe(true);
+      expect(session.isStreaming).toBe(true);
+      expect(session.getFollowUpMessages()).toEqual(["owned pending input"]);
 
-    await session.prompt("initial prompt");
+      releaseFirstPreflight.resolve();
+      expect(await rejected).toMatch(/already processing/);
+      expect(session.agent.signal).toBe(activeSignal);
+      expect(session.getFollowUpMessages()).toEqual(["owned pending input"]);
+      releaseTerminal.resolve();
+      await active;
 
-    expect(requests).toHaveLength(2);
-    expect(JSON.stringify(requests[1]?.messages)).toContain("queued after end");
-    expect(session.agent.hasQueuedMessages()).toBe(false);
-    expect(lifecycleEvents).toEqual(["agent_end", "agent_end", "agent_settled"]);
+      expect(requests).toHaveLength(1);
+      expect(session.getFollowUpMessages()).toEqual(["owned pending input"]);
+      expect(JSON.stringify(session.agent.state.messages)).not.toContain("rejected contender");
+      expect(settled).not.toHaveBeenCalled();
+    } finally {
+      releaseFirstPreflight.resolve();
+      releaseTerminal.resolve();
+      session.agent.abort();
+      await Promise.allSettled([rejected, ...(active ? [active] : [])]);
+      await session.agent.waitForIdle();
+    }
   });
+
+  it.each(["none", "abort", "handoff"] as const)(
+    "honors live cancellation in a normal agent-end handler (%s)",
+    async (cancellation) => {
+      const sessionRef: { current?: AgentSession } = {};
+      let queued = false;
+      let cancellationState: { streaming: boolean; aborted: boolean } | undefined;
+      const lifecycleEvents: string[] = [];
+      const handlers = new Map<string, Array<(...args: unknown[]) => Promise<unknown>>>([
+        [
+          "agent_end",
+          [
+            async () => {
+              lifecycleEvents.push("agent_end");
+              if (!queued) {
+                queued = true;
+                await sessionRef.current?.followUp("queued after end");
+                if (cancellation !== "none") {
+                  const session = sessionRef.current;
+                  const signal = session?.agent.signal;
+                  session?.agent.abort(
+                    cancellation === "handoff" ? { turnHandoff: true } : undefined,
+                  );
+                  cancellationState = {
+                    streaming: session?.isStreaming === true,
+                    aborted: signal?.aborted === true,
+                  };
+                }
+              }
+              return undefined;
+            },
+          ],
+        ],
+        ["agent_settled", [async () => lifecycleEvents.push("agent_settled")]],
+      ]);
+      const requests: Context[] = [];
+      streamMocks.streamSimple.mockImplementation((activeModel: Model, context: Context) => {
+        requests.push(context);
+        return createAssistantResultStream(
+          createAssistant(activeModel, [{ type: "text", text: `answer ${requests.length}` }]),
+        );
+      });
+      const { session } = await createTestSession({
+        resourceLoader: createResourceLoader(handlers),
+      });
+      sessionRef.current = session;
+
+      try {
+        await session.prompt("initial prompt");
+
+        if (cancellation !== "none") {
+          expect(cancellationState).toEqual({ streaming: true, aborted: true });
+        }
+        expect(requests).toHaveLength(cancellation === "none" ? 2 : 1);
+        if (cancellation === "none") {
+          expect(JSON.stringify(requests[1]?.messages)).toContain("queued after end");
+          expect(session.agent.hasQueuedMessages()).toBe(false);
+          expect(lifecycleEvents).toEqual(["agent_end", "agent_end", "agent_settled"]);
+        } else {
+          expect(JSON.stringify(session.agent.state.messages)).not.toContain("queued after end");
+          expect(session.getFollowUpMessages()).toEqual(["queued after end"]);
+          expect(session.agent.hasQueuedMessages()).toBe(true);
+          expect(lifecycleEvents).toEqual(
+            cancellation === "handoff" ? ["agent_end"] : ["agent_end", "agent_settled"],
+          );
+        }
+      } finally {
+        session.agent.abort();
+        await session.agent.waitForIdle();
+      }
+    },
+  );
 
   it.each([
     {

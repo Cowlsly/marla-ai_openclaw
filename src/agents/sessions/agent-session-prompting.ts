@@ -9,6 +9,7 @@ import type {
   UserTurnTranscriptRecorder,
 } from "../../sessions/user-turn-transcript.types.js";
 import type { AgentMessage } from "../runtime/index.js";
+import { isTurnHandoffAbort } from "../runtime/internal-hooks.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { AgentSessionBase } from "./agent-session-base.js";
 import type { PromptOptions } from "./agent-session-types.js";
@@ -18,7 +19,7 @@ import { expandPromptTemplate } from "./prompt-templates.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { setSteeringMessageIdentity } from "./steering-message-identity.js";
 
-type PostAgentRunAction = "continue" | "settled" | "handoff";
+type PostAgentRunAction = "continue" | "settled";
 
 export abstract class AgentSessionPrompting extends AgentSessionBase {
   // =========================================================================
@@ -26,40 +27,43 @@ export abstract class AgentSessionPrompting extends AgentSessionBase {
   // =========================================================================
 
   private async runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-    let endedForTurnHandoff = false;
+    const ownedRun: { signal: AbortSignal | undefined } = { signal: undefined };
+    const startRun = (start: () => Promise<void>): Promise<void> => {
+      const priorSignal = this.agent.signal;
+      const promise = start();
+      const startedSignal = this.agent.signal;
+      // Agent acquires its controller synchronously. Retain completed ownership
+      // when an idle continuation rejects, but never settle a foreign active run.
+      if (startedSignal !== priorSignal) {
+        ownedRun.signal = startedSignal;
+      } else if (priorSignal) {
+        ownedRun.signal = undefined;
+      }
+      return promise;
+    };
     try {
-      await this.agent.prompt(messages);
+      await startRun(() => this.agent.prompt(messages));
       while (true) {
-        const action = await this.handlePostAgentRun();
-        if (action !== "continue") {
-          endedForTurnHandoff = action === "handoff";
+        const action = await this.handlePostAgentRun(ownedRun.signal);
+        if (action !== "continue" || ownedRun.signal?.aborted) {
           break;
         }
-        await this.agent.continue();
+        await startRun(() => this.agent.continue());
       }
     } finally {
       this.systemPromptOverride = undefined;
       this.flushPendingBashMessages();
-      // Consume handoff state before callbacks can start a nested run and set it again.
-      endedForTurnHandoff ||= this.lastRunEndedForTurnHandoff;
-      this.lastRunEndedForTurnHandoff = false;
       // Failed or aborted runs can still be idle; only handoff leaves external delivery pending.
-      if (!endedForTurnHandoff) {
+      if (ownedRun.signal && !isTurnHandoffAbort(ownedRun.signal)) {
         await this.currentExtensionRunner.emit({ type: "agent_settled" });
       }
     }
   }
 
-  private async handlePostAgentRun(): Promise<PostAgentRunAction> {
+  private async handlePostAgentRun(signal: AbortSignal | undefined): Promise<PostAgentRunAction> {
     const msg = this.lastAssistantMessage;
     this.lastAssistantMessage = undefined;
-    const endedForTurnHandoff = this.lastRunEndedForTurnHandoff;
-    this.lastRunEndedForTurnHandoff = false;
-    if (endedForTurnHandoff) {
-      // External delivery owns the next run after a deliberate turn handoff.
-      return "handoff";
-    }
-    if (!msg || msg.stopReason === "aborted") {
+    if (signal?.aborted || !msg || msg.stopReason === "aborted") {
       return "settled";
     }
 

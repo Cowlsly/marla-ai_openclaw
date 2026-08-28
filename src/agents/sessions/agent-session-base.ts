@@ -346,18 +346,9 @@ export abstract class AgentSessionBase {
   // Track last assistant message for auto-compaction check
   protected lastAssistantMessage: AssistantMessage | undefined = undefined;
   private lastAssistantEntryId: string | undefined;
-  protected lastRunEndedForTurnHandoff = false;
 
   /** Internal handler for agent events - shared by subscribe and reconnect */
-  protected handleAgentEvent = async (event: AgentEvent, signal?: AbortSignal): Promise<void> => {
-    if (event.type === "agent_end") {
-      const reason: unknown = signal?.reason;
-      this.lastRunEndedForTurnHandoff =
-        signal?.aborted === true &&
-        typeof reason === "object" &&
-        reason !== null &&
-        (reason as { turnHandoff?: unknown }).turnHandoff === true;
-    }
+  protected handleAgentEvent = async (event: AgentEvent): Promise<void> => {
     if (this.eventMayWriteSession(event)) {
       await this.runWithSessionWriteSettlement(
         async () => await this.handleAgentEventUnlocked(event),

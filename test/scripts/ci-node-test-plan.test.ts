@@ -874,6 +874,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     const runtimeTargets = [
       "test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts",
       "src/gateway/gateway-concurrent-streams.test.ts",
+      "src/gateway/gateway-terminal-cancellation.test.ts",
     ];
     for (const shards of [
       createNodeTestShards(),
