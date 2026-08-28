@@ -91,6 +91,22 @@ describe("Gateway terminal cancellation", () => {
 
     const requests: string[] = [];
     const sends: Array<Record<string, unknown>> = [];
+    const recordTelegramWire = (stage: string) => {
+      console.info(
+        "terminal-cancellation Telegram wire",
+        JSON.stringify({
+          stage,
+          total: sends.length,
+          omitted: Math.max(0, sends.length - 8),
+          sends: sends.slice(-8).map((send, index, recent) => ({
+            messageId: 10_001 + sends.length - recent.length + index,
+            chatId: String(send.chat_id).slice(0, 64),
+            text: typeof send.text === "string" ? send.text.slice(0, 1024) : null,
+            textLength: typeof send.text === "string" ? send.text.length : null,
+          })),
+        }),
+      );
+    };
     const serverErrors: unknown[] = [];
     const pendingPolls = new Set<ServerResponse>();
     let holdNextDelivery = true;
@@ -195,6 +211,7 @@ describe("Gateway terminal cancellation", () => {
           controlUi: { enabled: false },
         },
         hooks: { enabled: false },
+        logging: { consoleStyle: "json" },
         agents: {
           defaults: {
             workspace: gateway.state.workspaceDir,
@@ -329,10 +346,18 @@ describe("Gateway terminal cancellation", () => {
           if (abort) {
             // Cancellation rejects after attempt cleanup, bypassing normal run-done.
             // The exact session-lane rejection joins that work; an abort ACK does not.
-            const laneError = logs
+            const laneErrors = logs
               .split("\n")
-              .find((line) => line.includes(`lane task error: lane=session:${sessionKey} `));
-            expect(laneError).toContain('error="Reply operation aborted by user"');
+              .filter((line) => line.startsWith("{"))
+              .map((line) => JSON.parse(line) as Record<string, unknown>)
+              .filter(
+                (record) =>
+                  record.subsystem === "diagnostic" &&
+                  typeof record.message === "string" &&
+                  record.message.startsWith(`lane task error: lane=session:${sessionKey} `),
+              );
+            expect(laneErrors).toHaveLength(1);
+            expect(laneErrors[0]).toMatchObject({ level: "error", errorName: "AbortError" });
             expect(logs).toMatch(
               new RegExp(`run cleanup: runId=${runA} [^\\n]*aborted=true timedOut=false`),
             );
@@ -352,7 +377,22 @@ describe("Gateway terminal cancellation", () => {
           const terminal = await client.request("agent.wait", { runId: runA, timeoutMs: 0 });
           expect(terminal.ok, JSON.stringify(terminal.error)).toBe(true);
           expect(terminal.payload).toMatchObject({ runId: runA });
-          console.info("terminal-cancellation public outcome", JSON.stringify(terminal.payload));
+          const outcome = terminal.payload as Record<string, unknown>;
+          console.info(
+            "terminal-cancellation public outcome",
+            JSON.stringify({
+              runId: runA,
+              status: outcome.status,
+              stopReason:
+                typeof outcome.stopReason === "string"
+                  ? outcome.stopReason.slice(0, 1024)
+                  : undefined,
+              timeoutPhase: outcome.timeoutPhase,
+              providerStarted: outcome.providerStarted,
+              error: typeof outcome.error === "string" ? outcome.error.slice(0, 1024) : undefined,
+            }),
+          );
+          recordTelegramWire(`native-joined:${runA}`);
         }
         const joinedHistory = await client.request("sessions.get", { key: sessionKey });
         expect(joinedHistory.ok, JSON.stringify(joinedHistory.error)).toBe(true);
@@ -428,8 +468,10 @@ describe("Gateway terminal cancellation", () => {
           ).toEqual([]);
         }
         expect(serverErrors).toEqual([]);
+        recordTelegramWire(`disposition:${runA}:${runB}`);
       }
     } catch (error) {
+      recordTelegramWire("failure");
       console.error(gateway?.logs());
       throw error;
     } finally {

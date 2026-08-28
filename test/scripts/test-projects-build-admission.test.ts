@@ -170,6 +170,17 @@ syncBuiltinESMExports();\n`,
       "runtime",
     ],
     [
+      "Gateway active memory",
+      "scripts/run-vitest.mts",
+      [
+        "run",
+        "--config",
+        "test/vitest/vitest.gateway-core.config.ts",
+        "gateway-active-memory.test.ts",
+      ],
+      "runtime",
+    ],
+    [
       "aggregate config",
       "scripts/run-vitest.mts",
       ["run", "--config", "test/vitest/vitest.full-extensions.config.ts"],

@@ -22,6 +22,7 @@ import * as clientVoiceSession from "../talk/client-voice-session.js";
 import { wrapToolWithBeforeToolCallHook } from "./agent-tools.before-tool-call.js";
 import { resetAdjustedParamsByToolCallIdForTests } from "./agent-tools.before-tool-call.state.js";
 import type { HookContext } from "./agent-tools.before-tool-call.types.js";
+import * as toolExecutionPreparer from "./agent-tools.execution-preparer.js";
 import * as nodeHost from "./bash-tools.exec-host-node.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
 import type { ExecToolDefaults } from "./bash-tools.exec-types.js";
@@ -177,7 +178,12 @@ describe("Code Mode subscribed host denial", () => {
   it.each(["repair", "deny", "veto", "throw", "invalid"] as const)(
     "judges final host arguments after one real hook: %s",
     async (change) => {
-      const before = installBefore(() => {
+      const releaseHook = createDeferred();
+      const firstExecResult = createDeferred<Record<string, unknown>>();
+      const before = installBefore(async () => {
+        if (change === "repair") {
+          await releaseHook.promise;
+        }
         if (change === "throw") {
           throw new Error("hook failed");
         }
@@ -192,19 +198,68 @@ describe("Code Mode subscribed host denial", () => {
           },
         };
       });
-      const harness = createHostHarness({ name: `hook-${change}` });
+      const ownedExecutions: Promise<unknown>[] = [];
+      const createPreparer = toolExecutionPreparer.createInternalExecutionPreparer;
+      const preparerSpy = vi
+        .spyOn(toolExecutionPreparer, "createInternalExecutionPreparer")
+        .mockImplementation((startExecution) =>
+          createPreparer((...args) => {
+            // Subscriber cancellation can settle before the actual wrapper's cleanup.
+            // Retain its exact promise so no continuation outlives this fixture.
+            const execution = startExecution(...args);
+            ownedExecutions.push(execution);
+            void execution.catch(() => undefined);
+            return execution;
+          }),
+        );
+      let harness: ReturnType<typeof createHostHarness>;
       try {
-        const details = await harness.run(
-          change === "repair"
-            ? deniedCode
-            : 'return await exec({ command: "printf initial", host: "gateway" });',
+        harness = createHostHarness({ name: `hook-${change}` });
+      } finally {
+        preparerSpy.mockRestore();
+      }
+      if (change === "repair") {
+        const execTool = expectDefined(harness.tools[0], "outer exec");
+        const execute = execTool.execute;
+        vi.spyOn(execTool, "execute").mockImplementation(async (...args) => {
+          try {
+            const result = await execute(...args);
+            firstExecResult.resolve(resultDetails(result));
+            return result;
+          } catch (error) {
+            firstExecResult.reject(error);
+            throw error;
+          }
+        });
+      }
+      const running = harness.run(
+        change === "repair"
+          ? deniedCode
+          : 'return await exec({ command: "printf initial", host: "gateway" });',
+      );
+      try {
+        const releaseAfterWaiting = async () => {
+          if (change !== "repair") {
+            return;
+          }
+          // Release the real async hook only after the public exec yields.
+          // The same operation must finish through wait without replaying its hook.
+          const first = await firstExecResult.promise;
+          expect(first).toMatchObject({ status: "waiting", reason: "pending_tools" });
+          expect(first.pendingToolCalls).toHaveLength(1);
+          expect(before).toHaveBeenCalledOnce();
+          expect(ownedExecutions.length).toBeGreaterThan(0);
+          expect(harness.spawn).not.toHaveBeenCalled();
+          expect(harness.remote).not.toHaveBeenCalled();
+          releaseHook.resolve();
+        };
+        const [details] = await Promise.all([running, releaseAfterWaiting()]);
+        expect(details.status).toBe(
+          change === "repair" || change === "veto" ? "completed" : "failed",
         );
         expect(before).toHaveBeenCalledOnce();
         expect(harness.remote).not.toHaveBeenCalled();
         expect(harness.spawn).toHaveBeenCalledTimes(change === "repair" ? 1 : 0);
-        expect(details.status).toBe(
-          change === "repair" || change === "veto" ? "completed" : "failed",
-        );
         if (change === "veto") {
           expect(details.value).toMatchObject({ status: "blocked", reason: "hook veto" });
         }
@@ -215,7 +270,12 @@ describe("Code Mode subscribed host denial", () => {
           change === "deny" || change === "invalid",
         );
       } finally {
+        harness.runAbortController.abort(new Error("host hook test cleanup"));
+        releaseHook.resolve();
         harness.dispose();
+        await Promise.allSettled([running, ...ownedExecutions]);
+        await vi.waitFor(() => expect(harness.subscription.getItemLifecycle().activeCount).toBe(0));
+        expect(testing.activeRuns.size).toBe(0);
       }
     },
   );
