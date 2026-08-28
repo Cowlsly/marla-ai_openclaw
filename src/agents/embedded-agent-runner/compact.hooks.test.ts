@@ -553,6 +553,49 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
     expect(hookRunner.runAfterCompaction).toHaveBeenCalledOnce();
   });
 
+  it("refreshes the delegated watchdog before delayed fallback setup", async () => {
+    vi.useFakeTimers();
+    try {
+      const compactionTimeoutReset = vi.fn();
+      const fallbackSetupStarted = createDeferred();
+      const createAgentSession = createAgentSessionMock.getMockImplementation();
+      if (!createAgentSession) {
+        throw new Error("Expected a create-agent-session implementation");
+      }
+      createAgentSessionMock.mockImplementation(async (...args) => {
+        if (createAgentSessionMock.mock.calls.length === 2) {
+          expect(compactionTimeoutReset).toHaveBeenCalledTimes(3);
+          fallbackSetupStarted.resolve(undefined);
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 20);
+          });
+        }
+        return await createAgentSession(...args);
+      });
+      sessionCompactImpl
+        .mockRejectedValueOnce(new Error("Reasoning is mandatory for this endpoint"))
+        .mockResolvedValueOnce({
+          summary: "fallback summary",
+          firstKeptEntryId: "entry-fallback",
+          tokensBefore: 120,
+          details: { ok: true },
+        });
+
+      const pending = compactEmbeddedAgentSessionDirect(
+        wrappedCompactionArgs({ compactionTimeoutReset, thinkLevel: "off" }),
+      );
+      await fallbackSetupStarted.promise;
+      await vi.advanceTimersByTimeAsync(20);
+
+      await expect(pending).resolves.toMatchObject({ ok: true, compacted: true });
+      expect(createAgentSessionMock).toHaveBeenCalledTimes(2);
+      expect(compactionTimeoutReset).toHaveBeenCalledTimes(6);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed before generic compaction for a model-locked native session", async () => {
     const result = await compactEmbeddedAgentSessionDirect({
       sessionId: "session-1",

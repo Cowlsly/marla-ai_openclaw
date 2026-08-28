@@ -576,6 +576,9 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
               `[compaction] request rejected for ${provider}/${modelId}; retrying with ${fallbackThinking}`,
             );
             thinkLevel = fallbackThinking;
+            // The rejected request may have consumed nearly its full window. Rearm the
+            // delegated watchdog before rebuilding the session for the fallback attempt.
+            params.compactionTimeoutReset?.();
             continue;
           }
           throw err;
