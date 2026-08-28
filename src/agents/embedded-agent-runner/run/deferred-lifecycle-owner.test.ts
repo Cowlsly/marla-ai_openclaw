@@ -72,6 +72,9 @@ describe("deferred logical-turn lifecycle", () => {
           expect(manager.signal.reason).toBe(operation.abortSignal.reason);
         }
         await manager.complete();
+        // Reply registration remains owned by outer cleanup after the native handle is released.
+        expect(isEmbeddedAgentRunActive(sessionId)).toBe(withReplyOperation);
+        operation?.complete();
         expect(isEmbeddedAgentRunActive(sessionId)).toBe(false);
       } finally {
         await manager.complete();
