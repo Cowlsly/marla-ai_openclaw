@@ -3,8 +3,12 @@ import { safeParseJson } from "@openclaw/normalization-core";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { quoteSqliteIdentifier } from "../infra/sqlite-schema-sql.js";
 import { repairLegacySubagentRetainedResults } from "./openclaw-state-db-legacy-backfills.js";
-import { tableExists, tableHasColumn } from "./openclaw-state-db-schema-helpers.js";
-import { rebuildCanonicalStateTable } from "./openclaw-state-db-schema-rebuild.js";
+import {
+  rebuildCanonicalStateTable,
+  tableExists,
+  tableHasColumn,
+} from "./openclaw-state-db-schema-helpers.js";
+import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 
 const FAILURE_DESTINATION_COLUMNS = [
   ["failure_delivery_mode", "mode"],
@@ -93,7 +97,7 @@ export function migrateJsonCanonicalWideRowsV13(
   let migrated = false;
   if (tableExists(db, "cron_jobs") && tableHasColumn(db, "cron_jobs", "schedule_kind")) {
     reprojectLegacyCronJson(db);
-    rebuildCanonicalStateTable(db, "cron_jobs", 13);
+    rebuildCanonicalStateTable(db, "cron_jobs", 13, OPENCLAW_STATE_SCHEMA_SQL);
     migrated = true;
   }
   const hasSetupState = tableExists(db, "workspace_setup_state");
@@ -103,7 +107,7 @@ export function migrateJsonCanonicalWideRowsV13(
     // and updated_at relax to nullable so attestation-only rows can exist).
     db.exec("ALTER TABLE workspace_setup_state ADD COLUMN attested_at_ms INTEGER;");
     db.exec("ALTER TABLE workspace_setup_state ADD COLUMN attestation_updated_at_ms INTEGER;");
-    rebuildCanonicalStateTable(db, "workspace_setup_state", 13);
+    rebuildCanonicalStateTable(db, "workspace_setup_state", 13, OPENCLAW_STATE_SCHEMA_SQL);
     migrated = true;
   }
   if (hasAttestations) {
@@ -142,7 +146,12 @@ export function migrateJsonCanonicalWideRowsV13(
     tableExists(db, "workspace_generated_bootstrap_hashes")
   ) {
     // Repoint the FK to the merged table and drop hashes whose owner row is gone.
-    rebuildCanonicalStateTable(db, "workspace_generated_bootstrap_hashes", 13);
+    rebuildCanonicalStateTable(
+      db,
+      "workspace_generated_bootstrap_hashes",
+      13,
+      OPENCLAW_STATE_SCHEMA_SQL,
+    );
     db.exec(`
       DELETE FROM workspace_generated_bootstrap_hashes
        WHERE workspace_key NOT IN (SELECT workspace_key FROM workspace_setup_state);
@@ -221,7 +230,7 @@ export function migrateJsonCanonicalWideRowsV13(
   if (tableExists(db, "subagent_runs") && tableHasColumn(db, "subagent_runs", "task")) {
     // Shipped pending-delivery columns can hold the only surviving result text.
     repairLegacySubagentRetainedResults(db);
-    rebuildCanonicalStateTable(db, "subagent_runs", 13);
+    rebuildCanonicalStateTable(db, "subagent_runs", 13, OPENCLAW_STATE_SCHEMA_SQL);
     migrated = true;
   }
   return migrated;

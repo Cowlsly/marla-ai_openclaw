@@ -16,12 +16,12 @@ import {
 import { resolveDatabasePath } from "./openclaw-state-db-maintenance.js";
 import * as operatorApprovalMigration from "./openclaw-state-db-operator-approval-migration.js";
 import {
+  rebuildCanonicalStateTable,
   tableExists,
   tableHasColumn,
   tablePrimaryKeyColumns,
 } from "./openclaw-state-db-schema-helpers.js";
 import { OpenClawStateDatabaseSchemaMigrationRequiredError } from "./openclaw-state-db-schema-migration-required.js";
-import { rebuildCanonicalStateTable } from "./openclaw-state-db-schema-rebuild.js";
 import { FOLDED_SINGLETON_STATE_TABLES_V12 } from "./openclaw-state-db-schema-v12-foldin.js";
 import * as sessionWatchMigration from "./openclaw-state-db-session-watch-migration.js";
 import {
@@ -149,7 +149,7 @@ export function migrateGitHubPublicationBranches(
   // NOT NULL so queued work and already-published destinations survive unchanged.
   db.exec("ALTER TABLE github_publication_requests ADD COLUMN source_branch TEXT;");
   db.exec("UPDATE github_publication_requests SET source_branch = branch;");
-  rebuildCanonicalStateTable(db, "github_publication_requests", 14);
+  rebuildCanonicalStateTable(db, "github_publication_requests", 14, OPENCLAW_STATE_SCHEMA_SQL);
   return true;
 }
 

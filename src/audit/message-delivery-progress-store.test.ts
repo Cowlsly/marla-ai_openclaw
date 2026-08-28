@@ -32,22 +32,6 @@ const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const PINNED_PRE_C04_READER_SHA = "5dc4cf602bc5e263e83cd16a12bb1e100544f4c3";
 const OUTBOUND_PROGRESS_PRUNE_BATCH_ROWS_CONTRACT = 1_024;
 
-function ensurePinnedReaderCommit(repositoryRoot: string): void {
-  try {
-    execFileSync("git", ["cat-file", "-e", `${PINNED_PRE_C04_READER_SHA}^{commit}`], {
-      cwd: repositoryRoot,
-      stdio: "pipe",
-    });
-  } catch {
-    // CI checks out a depth-one synthetic merge. Fetch only the immutable proof
-    // reader when that object is absent; never substitute the moving base ref.
-    execFileSync("git", ["fetch", "--no-tags", "--depth=1", "origin", PINNED_PRE_C04_READER_SHA], {
-      cwd: repositoryRoot,
-      stdio: "pipe",
-    });
-  }
-}
-
 function databaseOptions() {
   return { env: { OPENCLAW_STATE_DIR: tempDirs.make("message-progress-") } };
 }
@@ -289,16 +273,27 @@ describe("outbound message progress companion", () => {
     closeOpenClawStateDatabaseForTest();
 
     const repositoryRoot = process.cwd();
-    ensurePinnedReaderCommit(repositoryRoot);
     const checkoutParent = tempDirs.make("message-progress-pinned-reader-");
     const pinnedCheckout = path.join(checkoutParent, "checkout");
-    execFileSync("git", ["clone", "--shared", "--no-checkout", repositoryRoot, pinnedCheckout], {
-      cwd: repositoryRoot,
+    execFileSync("git", ["init", "--quiet", pinnedCheckout], {
+      cwd: checkoutParent,
       stdio: "pipe",
     });
     try {
-      // The pinned reader needs core sources, not every app/plugin/doc. A private
-      // sparse clone keeps the exact revision without changing our repo's Git config.
+      // Shallow local clones omit unreferenced commits; partial clones may lend missing blobs.
+      // Fetch this proof reader's immutable snapshot into its own store, never the caller's refs.
+      execFileSync(
+        "git",
+        [
+          "fetch",
+          "--no-tags",
+          "--depth=1",
+          "https://github.com/openclaw/openclaw.git",
+          PINNED_PRE_C04_READER_SHA,
+        ],
+        { cwd: pinnedCheckout, stdio: "pipe" },
+      );
+      // The pinned reader needs core sources, not every app/plugin/doc.
       execFileSync("git", ["sparse-checkout", "set", "--cone", "src", "config", "packages"], {
         cwd: pinnedCheckout,
         stdio: "pipe",
@@ -381,7 +376,7 @@ describe("outbound message progress companion", () => {
         limit: 10,
       }).entries.map((entry) => entry.event.outcome),
     ).toEqual(["queued", "platform_started", "sent"]);
-    // A pinned-SHA worktree plus a cold tsx compile of the audit/state modules costs
+    // An exact-SHA checkout plus a cold tsx compile of the audit/state modules costs
     // minutes on a contended runner; the 120s default makes this fail by construction.
   }, 300_000);
 
