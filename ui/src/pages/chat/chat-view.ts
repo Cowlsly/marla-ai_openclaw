@@ -110,6 +110,7 @@ export type ChatProps = ChatTaskSuggestionTrayProps &
     fallbackStatus?: FallbackStatus | null;
     progressCard?: ProgressCard | null;
     progressCardHasActiveRun?: boolean;
+    collapseTaskProgress?: boolean;
     onDismissProgressCard?: (card: ProgressCard) => void;
     gatewayQuestionPrompts?: readonly QuestionPrompt[];
     onGatewayQuestionChange?: () => void;
@@ -445,6 +446,7 @@ export function renderChat(props: ChatProps) {
     fallbackStatus: props.fallbackStatus,
     progressCard: props.progressCard,
     progressCardHasActiveRun: props.progressCardHasActiveRun,
+    collapseTaskProgress: props.collapseTaskProgress,
     onDismissProgressCard: props.onDismissProgressCard,
     gatewayQuestionPrompts: props.gatewayQuestionPrompts,
     messages: props.messages,
