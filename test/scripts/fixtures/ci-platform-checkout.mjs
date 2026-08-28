@@ -1,5 +1,4 @@
 import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,14 +6,16 @@ import { fileURLToPath } from "node:url";
 import { isPidAlive } from "../../../src/shared/pid-alive.ts";
 
 const [mode, root, policyScenario, ...args] = process.argv.slice(2);
-const linux = policyScenario.startsWith("linux:");
-const scenario = linux ? policyScenario.slice("linux:".length) : policyScenario;
+const [policy, startupFault] = policyScenario.split("/");
+const linux = policy.startsWith("linux:");
+const scenario = linux ? policy.slice("linux:".length) : policy;
 const fixture = fileURLToPath(import.meta.url);
 const workspace = path.join(root, "workspace");
 const lease = path.join(root, "lease");
 const recordsDir = path.join(root, "pids");
 const eventsFile = path.join(root, "events.jsonl");
 const commandsFile = path.join(root, "commands.jsonl");
+const failureFile = path.join(root, "fixture-error.json");
 
 function publish(name, value) {
   const target = path.join(root, name);
@@ -45,7 +46,7 @@ function boundary(name) {
   );
 }
 
-async function until(predicate, label, timeout = 4_000) {
+async function until(predicate, label, timeout = Infinity) {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
     if (Date.now() >= deadline) {
@@ -55,14 +56,51 @@ async function until(predicate, label, timeout = 4_000) {
   }
 }
 
+function observe(child) {
+  let outcome;
+  const exited = new Promise((resolve) => {
+    const finish = (value) => {
+      outcome ??= value;
+      resolve(outcome);
+    };
+    // Subscribe immediately after spawn; errors are outcomes, not unhandled
+    // rejections while a caller is still waiting for readiness.
+    child.once("error", (error) => finish({ error: String(error) }));
+    child.once("exit", (code, signal) => finish({ code, signal }));
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish({ code: child.exitCode, signal: child.signalCode });
+    }
+  });
+  return { exited, getOutcome: () => outcome };
+}
+
+async function untilReady(predicate, label, observed) {
+  // The supervisor's existing 45-second lifetime owns startup; releasing its
+  // lease stops these waits without borrowing from the real cleanup allowance.
+  await until(() => {
+    if (!fs.existsSync(lease)) {
+      throw new Error(`Fixture stopped before ${label}`);
+    }
+    if (fs.existsSync(failureFile)) {
+      throw new Error(JSON.parse(fs.readFileSync(failureFile, "utf8")));
+    }
+    const outcome = observed.getOutcome();
+    if (outcome) {
+      throw new Error(`Fixture process ended before ${label}: ${JSON.stringify(outcome)}`);
+    }
+    // Check current state after installing terminal observers: readiness may
+    // already exist, but an exited process must never count as ready.
+    return predicate();
+  }, label);
+}
+
 function launch(role, attempt) {
   const child = spawn(process.execPath, [fixture, role, root, policyScenario, String(attempt)], {
     stdio: "ignore",
   });
-  child.on("error", (error) => {
-    throw error;
-  });
+  const observed = observe(child);
   child.unref();
+  return observed;
 }
 
 function holdLease() {
@@ -105,7 +143,18 @@ async function command() {
     process.on("SIGTERM", () => {});
     record(process.pid, mode, attempt);
     if (mode === "child") {
-      launch("grandchild", attempt);
+      // Fault injection crosses the former two-second fetch and four-second
+      // readiness clocks without delaying an assertion or teardown.
+      if (startupFault === "slow-grandchild" && attempt === 3) {
+        await delay(4_100);
+      }
+      const grandchild = launch("grandchild", attempt);
+      await untilReady(
+        () => fs.existsSync(path.join(root, `ready-${attempt}.json`)),
+        "grandchild readiness",
+        grandchild,
+      );
+      publish(`tree-ready-${attempt}.json`, attempt);
     } else {
       publish(`ready-${attempt}.json`, attempt);
     }
@@ -126,6 +175,9 @@ async function command() {
   const operation = args.shift();
   if (operation === "init") {
     boundary("init");
+    if (startupFault === "slow-init" && cwd === workspace) {
+      await delay(4_100);
+    }
     fs.mkdirSync(insideWorkspace(args[0]), { recursive: true });
     if (linux && cwd === workspace) {
       if (fs.readdirSync(workspace).length !== 0) {
@@ -139,8 +191,18 @@ async function command() {
     boundary(`fetch:${attempt}`);
     publish("attempt.json", attempt);
     record(process.pid, "parent", attempt);
-    launch("child", attempt);
-    await until(() => fs.existsSync(path.join(root, `ready-${attempt}.json`)), "tree readiness");
+    const child = launch("child", attempt);
+    await untilReady(
+      () => fs.existsSync(path.join(root, `tree-ready-${attempt}.json`)),
+      "tree readiness",
+      child,
+    );
+    if (scenario.startsWith("cancel-")) {
+      // Cancellation starts only after both descendant readiness waits settled;
+      // this disposition never advances the logical fetch clock.
+      publish(`cancel-ready-${attempt}.json`, attempt);
+      return;
+    }
     if (scenario === "early-leader-exit") {
       process.exit(0);
     }
@@ -162,6 +224,9 @@ async function command() {
     if (scenario === "git-exit-124") {
       process.exit(124);
     }
+    // One immutable tick per hanging attempt avoids replacing a file while
+    // native Windows Python may have it open for a deadline read.
+    publish(`fetch-clock/${attempt}.json`, attempt);
     return;
   } else if (operation === "checkout") {
     boundary(cwd === workspace ? "checkout" : "harness-checkout");
@@ -184,6 +249,7 @@ async function supervise() {
   fs.writeFileSync(eventsFile, "");
   fs.writeFileSync(commandsFile, "");
   fs.writeFileSync(lease, "owned\n");
+  fs.mkdirSync(path.join(root, "fetch-clock"));
   const bin = path.join(root, "bin");
   const commandPath = `${bin}${path.delimiter}${process.env.PATH}`;
   const home = path.join(root, "home");
@@ -255,7 +321,11 @@ async function supervise() {
         }
       }
       try {
-        await until(() => records().every((entry) => !isPidAlive(entry.pid)), "fixture cleanup");
+        await until(
+          () => records().every((entry) => !isPidAlive(entry.pid)),
+          "fixture cleanup",
+          4_000,
+        );
       } catch (err) {
         report.error ??= String(err);
       }
@@ -323,8 +393,11 @@ async function supervise() {
       detached: true,
       stdio: "ignore",
     });
-    sentinel.on("error", (error) => void stop(error));
-    await until(() => records().some((entry) => entry.role === "sentinel"), "sentinel readiness");
+    await untilReady(
+      () => records().some((entry) => entry.role === "sentinel"),
+      "sentinel readiness",
+      observe(sentinel),
+    );
     if (stopping) {
       return;
     }
@@ -361,18 +434,28 @@ async function supervise() {
         WORKFLOW_SHA: "b".repeat(40),
       },
     });
+    const observed = observe(shell);
     if (shell.pid) {
       record(shell.pid, "shell");
     }
-    const exited = once(shell, "exit");
     if (scenario.startsWith("cancel-")) {
-      await until(() => fs.existsSync(path.join(root, "ready-1.json")), "cancellation readiness");
+      await untilReady(
+        () => fs.existsSync(path.join(root, "cancel-ready-1.json")),
+        "cancellation readiness",
+        observed,
+      );
       // exec replaces Bash on POSIX: this is the owner, not the Git group.
       shell.kill(scenario.slice("cancel-".length));
     }
-    const [code] = await exited;
-    report.code = code;
+    const outcome = await observed.exited;
+    if (outcome.error) {
+      throw new Error(outcome.error);
+    }
+    report.code = outcome.code;
     boundary("exit");
+    if (fs.existsSync(failureFile)) {
+      throw new Error(JSON.parse(fs.readFileSync(failureFile, "utf8")));
+    }
     await stop();
   } catch (error) {
     await stop(error);
@@ -382,5 +465,10 @@ async function supervise() {
 if (mode === "supervise") {
   await supervise();
 } else {
-  await command();
+  try {
+    await command();
+  } catch (error) {
+    publish("fixture-error.json", String(error));
+    process.exit(1);
+  }
 }

@@ -61,6 +61,26 @@ const linuxCases =
 it.each([
   ...platformCases.map((entry) => Object.assign(entry, { linux: false, deletions: 0 })),
   ...linuxCases.map((entry) => Object.assign(entry, { linux: true })),
+  ...(process.platform === "win32"
+    ? []
+    : [
+        {
+          scenario: "cancel-SIGTERM/slow-init",
+          attempts: 1,
+          code: 143,
+          checkout: false,
+          linux: true,
+          deletions: 1,
+        },
+      ]),
+  ...[false, ...(process.platform === "win32" ? [] : [true])].map((linux) => ({
+    scenario: "recovery/slow-grandchild",
+    attempts: 4,
+    code: 0,
+    checkout: true,
+    linux,
+    deletions: linux ? 3 : 0,
+  })),
 ])(
   "preserves checkout ownership and fixture isolation (Linux=$linux, $scenario)",
   async ({ scenario, attempts, code, checkout, linux, deletions }) => {
@@ -76,22 +96,41 @@ it.each([
       throw new Error("Missing shared platform checkout shell");
     }
 
+    // Only fetch deadline reads use logical time. Startup, cancellation and
+    // native tree teardown keep their real clocks and original budget constants.
+    let accelerated = run;
+    for (const [source, replacement] of [
+      [
+        "def run_git(directory, *arguments, timeout=None):",
+        `def fixture_fetch_time():
+    ticks = os.listdir(os.path.join(os.environ["TMPDIR"], "fetch-clock"))
+    return sum(name.endswith(".json") for name in ticks) * (fetch_timeout_seconds + 1)
+
+
+def run_git(directory, *arguments, timeout=None):`,
+      ],
+      [
+        "deadline = time.monotonic() + timeout if timeout is not None else None",
+        "deadline = fixture_fetch_time() + timeout if timeout is not None else None",
+      ],
+      [
+        "if deadline is not None and time.monotonic() >= deadline:",
+        "if deadline is not None and fixture_fetch_time() >= deadline:",
+      ],
+    ] as const) {
+      expect(accelerated.split(source), `fixture clock injection: ${source}`).toHaveLength(2);
+      accelerated = accelerated.replace(source, replacement);
+    }
+    accelerated = accelerated
+      .replace("kill_at = deadline - cleanup_seconds / 2", "kill_at = time.monotonic()")
+      .replace(/retry_at = time\.monotonic\(\) \+ [^\n]+/u, "retry_at = time.monotonic() + 0.05");
+    expect(accelerated).not.toBe(run);
     const root = realpathSync(mkdtempSync(path.join(tmpdir(), "ci platform checkout ")));
     const workspace = path.join(root, "workspace");
     mkdirSync(workspace);
     if (linux) {
       writeFileSync(path.join(workspace, ".previous-checkout"), "stale\n");
     }
-    // Advance the test clock, not the real OS teardown budget: a subsecond
-    // cleanup deadline races process scheduling instead of testing ownership.
-    const accelerated = run
-      .replace(/fetch_timeout_seconds = [^\n]+/u, "fetch_timeout_seconds = 2")
-      .replace("kill_at = deadline - cleanup_seconds / 2", "kill_at = time.monotonic()")
-      .replace(/retry_at = time\.monotonic\(\) \+ [^\n]+/u, "retry_at = time.monotonic() + 0.05")
-      // Keep the original GNU timeout path executable for the pre-fix regression.
-      .replace("120s git", "2s git")
-      .replace("sleep $((attempt * 5))", "sleep 0.05");
-    expect(accelerated).not.toBe(run);
     // A broken preflight must never let these negative fixture tests run real Git.
     writeFileSync(
       path.join(root, "checkout.sh"),
