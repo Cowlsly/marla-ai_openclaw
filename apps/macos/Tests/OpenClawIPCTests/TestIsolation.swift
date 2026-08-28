@@ -60,7 +60,9 @@ enum TestIsolation {
         await TestIsolationLock.shared.acquire()
         var previousEnv: [String: String?] = [:]
         for (key, value) in env {
-            previousEnv[key] = getenv(key).map { String(cString: $0) }
+            // Subscript assignment's nested optional inference drops absent values here.
+            // Keep an entry for absence so cleanup knows to unset the key.
+            previousEnv.updateValue(getenv(key).map { String(cString: $0) }, forKey: key)
             if let value {
                 setenv(key, value, 1)
             } else {
