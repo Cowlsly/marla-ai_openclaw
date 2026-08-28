@@ -70,7 +70,6 @@ import {
   type OptionalCustomElement,
   TERMINAL_PANEL_ELEMENT,
 } from "./lazy-custom-element.ts";
-import { hasStoredLazyShellAction } from "./lazy-shell-action.ts";
 import { postNativeNavState, type NativeNavState } from "./native-nav-state.ts";
 import { readNativeHistoryState, type NativeHistoryState } from "./native-web-chrome.ts";
 import { resolveOnboardingMode } from "./onboarding-mode.ts";
@@ -81,15 +80,7 @@ import {
   pushServerUiPrefs,
 } from "./server-prefs.ts";
 import { setSettingsChangeListener } from "./settings.ts";
-import {
-  isStaleChunkImportError,
-  retryStaleChunkReloadWhenReachable,
-  scheduleStaleChunkReload,
-} from "./stale-chunk-reload.ts";
-
-type AppSidebarElement = HTMLElement & {
-  dismissTransientMenus: () => boolean;
-};
+import { isStaleChunkImportError, scheduleStaleChunkReload } from "./stale-chunk-reload.ts";
 
 const APP_SIDEBAR_TAG = "openclaw-app-sidebar";
 // Stable references so the sidebar's enabledRouteIds property does not churn
@@ -157,8 +148,7 @@ class OpenClawShell
   readonly lazyCustomElements = new LazyCustomElementRequestController(
     this,
     () => this.shellChrome.cancelPendingLazyAction(),
-    () =>
-      hasStoredLazyShellAction() ? retryStaleChunkReloadWhenReachable() : Promise.resolve(false),
+    (canReload) => this.shellChrome.retryPendingLazyAction(canReload),
   );
   // Gates lazy-action replay on the element being rendered; while the shell is
   // still splash-gated, replaying would loop through the open handlers forever.
@@ -172,7 +162,7 @@ class OpenClawShell
   // Desktop and modal navigation are two slots for the same live sidebar.
   // Moving its element preserves session controllers and the resident pet
   // instead of resetting their lifecycle at every responsive breakpoint.
-  readonly navigationSidebar = document.createElement(APP_SIDEBAR_TAG) as AppSidebarElement;
+  readonly navigationSidebar = document.createElement(APP_SIDEBAR_TAG);
   // Where "Back to app" / Escape leaves the settings takeover; falls back to
   // chat (the app default route) when settings was the entry point.
   lastWorkspaceLocation: ShellNavigationHost["lastWorkspaceLocation"] = null;

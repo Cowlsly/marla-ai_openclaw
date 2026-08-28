@@ -20,6 +20,9 @@ NODE_DEFAULT_MAJOR=26
 # Homebrew ships the current Node line as plain "node" (no versioned node@26
 # formula exists); versioned formulas only cover LTS lines like node@24.
 NODE_BREW_FORMULA="node"
+# Linux package repositories can publish builds ahead of the Node release line.
+# Provision the supported LTS line there so a fresh install never receives a prerelease runtime.
+NODE_LINUX_DEFAULT_MAJOR=24
 NODE_MIN_MAJOR=22
 NODE_22_MIN_MINOR=22
 NODE_22_MIN_PATCH=3
@@ -181,7 +184,7 @@ run_remote_bash() {
     /bin/bash "$tmp"
 }
 
-GUM_VERSION="${OPENCLAW_GUM_VERSION:-0.17.0}"
+GUM_VERSION="${OPENCLAW_GUM_VERSION:-2.0.0}"
 GUM=""
 GUM_STATUS="skipped"
 GUM_REASON=""
@@ -2277,7 +2280,7 @@ install_node() {
         ui_info "Installing Node.js via NodeSource"
         if command -v apt-get &> /dev/null; then
             local tmp setup_url
-            setup_url="https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
+            setup_url="https://deb.nodesource.com/setup_${NODE_LINUX_DEFAULT_MAJOR}.x"
             mktempfile tmp
             run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
@@ -2289,7 +2292,7 @@ install_node() {
             fi
         elif command -v dnf &> /dev/null; then
             local tmp setup_url
-            setup_url="https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
+            setup_url="https://rpm.nodesource.com/setup_${NODE_LINUX_DEFAULT_MAJOR}.x"
             mktempfile tmp
             run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
@@ -2301,7 +2304,7 @@ install_node() {
             fi
         elif command -v yum &> /dev/null; then
             local tmp setup_url
-            setup_url="https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
+            setup_url="https://rpm.nodesource.com/setup_${NODE_LINUX_DEFAULT_MAJOR}.x"
             mktempfile tmp
             run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
@@ -3571,7 +3574,7 @@ try {
 }
 
 refresh_gateway_service_if_loaded() {
-    local claw="${OPENCLAW_BIN:-}"
+    local claw="${OPENCLAW_BIN:-}" refresh_output
     if [[ -z "$claw" ]]; then
         claw="$(resolve_openclaw_bin || true)"
     fi
@@ -3584,22 +3587,22 @@ refresh_gateway_service_if_loaded() {
     fi
 
     ui_info "Refreshing loaded gateway service"
-    if run_quiet_step "Refreshing gateway service" "$claw" gateway install --force; then
+    if ! refresh_output="$({ set +x; "$claw" gateway install --force; } 2>&1 | sed -n -e 's/.*SERVICE_DEFINITION_SEALED:.*/ask the privileged deployment owner to manually repair it/p' -e 's/.*SERVICE_DEFINITION_UNKNOWN:.*/inspect service-definition access and manually repair it/p')"; then
+        if [[ -n "$refresh_output" ]]; then
+            ui_warn "Code installed; gateway service definition left unchanged; ${refresh_output}"
+            ui_info "Run openclaw gateway status --deep, verify the installation owner, and restart it manually if needed."
+            return 0
+        else
+            ui_warn "Gateway service refresh failed; continuing"
+            return 0
+        fi
+    else
         ui_success "Gateway service metadata refreshed"
-    else
-        ui_warn "Gateway service refresh failed; continuing"
-        return 0
     fi
 
-    if run_quiet_step "Restarting gateway service" "$claw" gateway restart; then
-        ui_success "Gateway service restarted"
-    else
-        local user_claw
-        user_claw="$(openclaw_command_for_user "$claw")"
-        ui_warn "Gateway service restart failed; continuing. Run: ${user_claw} gateway restart"
-        return 0
-    fi
-
+    # `gateway install --force` activates the replacement service. Keep the
+    # explicit lifecycle restart in the finalization phase so doctor/plugin
+    # changes can still be applied without restarting twice here.
     run_quiet_step "Probing gateway service" "$claw" gateway status --deep || true
 }
 

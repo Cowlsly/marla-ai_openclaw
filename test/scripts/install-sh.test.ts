@@ -209,7 +209,7 @@ describe("install.sh", () => {
   });
 
   it.each(["apt-get", "dnf", "yum"])(
-    "rejects an invalid NodeSource response before %s repository setup",
+    "uses the LTS NodeSource stream and rejects an invalid response before %s setup",
     (packageManager) => {
       const tmp = mkdtempSync(join(tmpdir(), "openclaw-install-nodesource-validation-"));
       const marker = join(tmp, "configured");
@@ -234,6 +234,7 @@ describe("install.sh", () => {
               builtin command "$@"
             }
             download_file() {
+              printf 'download:%s\n' "$1"
               printf '<html>unexpected response</html>\n' > "$2"
             }
             ui_info() { printf 'info:%s\n' "$*"; }
@@ -256,6 +257,9 @@ describe("install.sh", () => {
         );
 
         expect(result.status).toBe(1);
+        expect(result.stdout).toContain(
+          `download:https://${packageManager === "apt-get" ? "deb" : "rpm"}.nodesource.com/setup_24.x`,
+        );
         expect(result.stdout).toContain("step:Downloading NodeSource setup script");
         expect(result.stdout).not.toContain("unexpected response");
         expect(existsSync(marker)).toBe(false);
@@ -3521,7 +3525,7 @@ EOF
         is_gateway_daemon_loaded() { return 0; }
         run_quiet_step() {
           case "$1" in
-            "Restarting gateway service"|"Checking gateway service") return 1 ;;
+            "Checking gateway service") return 1 ;;
             *) return 0 ;;
           esac
         }
@@ -3534,8 +3538,107 @@ EOF
 
     const quotedBin = openclawBin.replace(/ /g, "\\ ");
     expect(result?.status).toBe(0);
-    expect(result?.stdout).toContain(`Run: ${quotedBin} gateway restart`);
+    expect(result?.stdout).not.toContain(`Run: ${quotedBin} gateway restart`);
     expect(result?.stdout).toContain(`Run: ${quotedBin} gateway status --deep`);
+  });
+
+  it("does not explicitly restart after force-installing a loaded gateway", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "openclaw-install-gateway-transition-"));
+    const openclawBin = join(tmp, "openclaw");
+    const commandLog = join(tmp, "commands.log");
+    writeFileSync(openclawBin, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$COMMAND_LOG"\n');
+    chmodSync(openclawBin, 0o755);
+
+    try {
+      const result = runInstallShell(
+        `
+          set -euo pipefail
+          source "${SCRIPT_PATH}"
+          OPENCLAW_BIN=${JSON.stringify(openclawBin)}
+          is_gateway_daemon_loaded() { return 0; }
+          run_quiet_step() {
+            local title="$1"
+            shift
+            "$@"
+          }
+          refresh_gateway_service_if_loaded
+        `,
+        { COMMAND_LOG: commandLog },
+      );
+
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(readFileSync(commandLog, "utf8").trim().split("\n")).toEqual([
+        "gateway install --force",
+        "gateway status --deep",
+      ]);
+    } finally {
+      rmSync(tmp, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    { error: "SERVICE_DEFINITION_SEALED: protected", stream: "stderr" },
+    { error: "SERVICE_DEFINITION_SEALED: protected", stream: "stdout" },
+    { error: "SERVICE_DEFINITION_UNKNOWN: inaccessible", stream: "stderr" },
+    { error: "service manager unavailable", stream: "stderr" },
+  ])("handles a traced $error refresh in $stream", ({ error, stream }) => {
+    const root = mkdtempSync(join(tmpdir(), "openclaw-install-definition-"));
+    const openclaw = join(root, "openclaw");
+    const secretCanary = "installer-sh-secret-canary-never-render";
+    const commandLog = join(root, "commands.log");
+    writeFileSync(
+      openclaw,
+      [
+        "#!/bin/bash",
+        'printf "%s\\n" "$*" >> "$COMMAND_LOG"',
+        'if [[ "$*" == "gateway install --force" ]]; then',
+        '  if [[ "$SERVICE_STREAM" == stdout ]]; then printf "%s\\n" "$SERVICE_ERROR"; else printf "%s\\n" "$SERVICE_ERROR" >&2; fi',
+        '  printf "%s\\n" "$SECRET_CANARY" >&2; exit 1',
+        "fi",
+      ].join("\n"),
+    );
+    chmodSync(openclaw, 0o755);
+
+    try {
+      const result = runInstallShell(
+        [
+          "set -euo pipefail",
+          `source ${JSON.stringify(SCRIPT_PATH)}`,
+          `OPENCLAW_BIN=${JSON.stringify(openclaw)}`,
+          "is_gateway_daemon_loaded() { return 0; }",
+          "set -x",
+          "refresh_gateway_service_if_loaded",
+          "printf 'INSTALL_COMPLETE\\n'",
+        ].join("\n"),
+        {
+          COMMAND_LOG: commandLog,
+          SECRET_CANARY: secretCanary,
+          SERVICE_ERROR: error,
+          SERVICE_STREAM: stream,
+          TERM: "dumb",
+        },
+      );
+
+      const denied = error.startsWith("SERVICE_DEFINITION_");
+      expect(readFileSync(commandLog, "utf8").split("\n")).not.toContain("gateway restart");
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("+ refresh_gateway_service_if_loaded");
+      expect(result.stdout + result.stderr).not.toContain(secretCanary);
+      if (denied) {
+        expect(result.stdout).toContain("gateway service definition left unchanged");
+        expect(result.stdout).toContain(
+          error.includes("SEALED")
+            ? "privileged deployment owner"
+            : "inspect service-definition access",
+        );
+        expect(result.stdout).toContain("INSTALL_COMPLETE");
+      } else {
+        expect(result.stdout).toContain("Gateway service refresh failed; continuing");
+        expect(result.stdout).toContain("INSTALL_COMPLETE");
+      }
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
   it("refreshes the shell command cache after loading a persisted PATH update", () => {

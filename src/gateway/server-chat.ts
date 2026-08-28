@@ -94,6 +94,9 @@ const RESTART_RECOVERY_LIFECYCLE_PHASES = new Set(["start", "end", "error"]);
 function readChatRunStartupPhase(value: unknown): ChatRunStartupPhase | undefined {
   switch (value) {
     case "preparing_workspace":
+    case "naming_worktree":
+    case "creating_worktree":
+    case "running_setup":
     case "provisioning_environment":
     case "preparing_context":
     case "starting_model":
@@ -309,12 +312,9 @@ function resolveBroadcastDelta(params: {
   text: string;
   previousBroadcastText: string | undefined;
 }): BroadcastDelta | undefined {
-  if (!params.text) {
-    return undefined;
-  }
   const previous = params.previousBroadcastText;
   if (previous === undefined) {
-    return { deltaText: params.text };
+    return params.text ? { deltaText: params.text } : undefined;
   }
   if (!params.text.startsWith(previous)) {
     return { deltaText: params.text, replace: true };
@@ -347,10 +347,11 @@ export type AgentEventHandlerOptions = {
     clientRunId: string;
     sessionKey: string;
   }) => void;
-  markTrackedRunTerminalPersisted?: (params: {
+  settleTrackedTerminal?: (params: {
     runId: string;
     clientRunId: string;
     sessionKey: string;
+    persisted?: boolean;
   }) => void;
   trackTrackedRunTerminalPersistence?: (params: {
     runId: string;
@@ -449,7 +450,7 @@ export function createAgentEventHandler({
   lifecycleErrorRetryGraceMs = AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS,
   isChatSendRunActive = () => false,
   clearTrackedActiveRun,
-  markTrackedRunTerminalPersisted,
+  settleTrackedTerminal,
   trackTrackedRunTerminalPersistence,
   resolveActiveLifecycleGenerationForRun = () => undefined,
   updateRunToolErrorSummary,
@@ -832,18 +833,15 @@ export function createAgentEventHandler({
             { dropIfSlow: true },
           );
         };
-        const markPersisted = () => {
-          markTrackedRunTerminalPersisted?.({
-            runId: evt.runId,
-            clientRunId,
-            sessionKey,
-          });
-        };
         // Terminal writes serialize with restart markers. Reload only after the
         // write so subscribers see the canonical post-race session state.
         void persistence
           .then(() => {
-            markPersisted();
+            settleTrackedTerminal?.({
+              runId: evt.runId,
+              clientRunId,
+              sessionKey,
+            });
             broadcastSessionChange();
           })
           .catch((err: unknown) => {
@@ -852,8 +850,21 @@ export function createAgentEventHandler({
             );
             // Persistence recovery remains tracked by the controller entry, but
             // subscribers still need a terminal projection instead of hanging.
+            settleTrackedTerminal?.({
+              runId: evt.runId,
+              clientRunId,
+              sessionKey,
+              persisted: false,
+            });
             broadcastSessionChange(evt);
           });
+      } else {
+        settleTrackedTerminal?.({
+          runId: evt.runId,
+          clientRunId,
+          sessionKey,
+          persisted: false,
+        });
       }
     }
   };
@@ -950,23 +961,32 @@ export function createAgentEventHandler({
     clientRunId: string,
     sourceRunId: string,
     seq: number,
-    text: string,
-    delta?: unknown,
+    input: NonNullable<ReturnType<typeof resolveAssistantLiveChatInput>>,
     opts?: { controlUiVisible?: boolean },
   ) => {
     const run = chatRunState.getOrCreate(clientRunId);
     const previousRawText = run.rawBuffer ?? "";
+    if (!input.itemId) {
+      delete run.assistantScope;
+    } else if (run.assistantScope?.itemId !== input.itemId) {
+      run.assistantScope = { itemId: input.itemId, prefix: previousRawText };
+    }
     const mergedRawText = resolveMergedAssistantText({
       previousText: previousRawText,
-      nextText: text,
-      nextDelta: typeof delta === "string" ? delta : "",
+      nextText: input.text,
+      nextDelta: input.delta,
+      scope: run.assistantScope,
     });
-    if (!mergedRawText) {
+    if (!mergedRawText && !previousRawText) {
       return;
     }
     const now = Date.now();
     run.rawBuffer = mergedRawText;
     run.bufferUpdatedAt = now;
+    if (!mergedRawText) {
+      broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, "", opts);
+      return;
+    }
     const waitedMs = now - (run.deltaSentAt ?? 0);
     if (waitedMs < LIVE_TEXT_PACING_MS) {
       scheduleChatDeltaFlush(
@@ -1633,10 +1653,11 @@ export function createAgentEventHandler({
       }
       const assistantLiveChatInput =
         evt.stream === "assistant" ? resolveAssistantLiveChatInput(evt.data) : undefined;
+      const suppressAssistant = shouldSuppressAssistantEventForLiveChat(evt.data);
       if (
         !isAborted &&
         assistantLiveChatInput &&
-        !shouldSuppressAssistantEventForLiveChat(evt.data)
+        (!suppressAssistant || assistantLiveChatInput.itemId)
       ) {
         emitChatDelta(
           sessionKey,
@@ -1644,8 +1665,9 @@ export function createAgentEventHandler({
           clientRunId,
           evt.runId,
           evt.seq,
-          assistantLiveChatInput.text,
-          assistantLiveChatInput.delta,
+          suppressAssistant
+            ? { ...assistantLiveChatInput, text: "", delta: "" }
+            : assistantLiveChatInput,
           {
             controlUiVisible: isControlUiVisible,
           },

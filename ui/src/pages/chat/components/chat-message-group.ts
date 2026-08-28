@@ -53,6 +53,7 @@ import { extractGroupMeta, renderMessageMeta } from "./chat-message-timestamp.ts
 import type { SidebarContent, SidebarFullMessageLoader } from "./chat-sidebar.ts";
 import {
   isRunningToolCard,
+  renderBrowserTabPreviews,
   resolveToolRowText,
   shouldToggleSelectableDisclosure,
   syncToolDisclosureOverflow,
@@ -67,6 +68,7 @@ type ActiveContinuation = {
 type ReplyPreview = MessageReplyTarget & { sourceMessageId: string };
 
 type RenderMessageGroupOptions = {
+  latestBrowserTabs?: ReadonlyMap<string, string>;
   onOpenSidebar?: (content: SidebarContent) => void;
   onOpenWorkspaceFile?: (target: { path: string; line?: number | null }) => void;
   sessionKey?: string;
@@ -332,6 +334,7 @@ export function renderActivityGroup(
             )
           : nothing}
       </div>
+      ${renderBrowserTabPreviews(groups, opts)}
     </div>
   `;
   return presentation === "continuation"
@@ -386,7 +389,7 @@ export function renderMessageGroupContent(group: MessageGroup, opts: RenderMessa
     }
   }
   const who = resolveMessageGroupSenderLabel(group, opts);
-  return group.messages.map((item, index) => {
+  const messages = group.messages.map((item, index) => {
     const actionDetails = resolveMessageActionDetails({
       message: item.message,
       messageId: item.key,
@@ -416,6 +419,9 @@ export function renderMessageGroupContent(group: MessageGroup, opts: RenderMessa
       opts.onOpenSidebar,
     );
   });
+  return html`${messages}${opts.showToolCalls === false
+    ? nothing
+    : renderBrowserTabPreviews([group], opts)}`;
 }
 
 export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroupOptions) {
@@ -492,12 +498,9 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
     }
   }
   const lastMessageIndex = group.messages.length - 1;
-  const runFrameActive = ownsRunFrame && Boolean(group.isStreaming || opts.activeContinuation);
-  const footerActionDetails = runFrameActive
-    ? null
-    : ownsRunFrame
-      ? (messageActionDetails[0] ?? null)
-      : (messageActionDetails[lastMessageIndex] ?? null);
+  const footerActionDetails = ownsRunFrame
+    ? (messageActionDetails[0] ?? null)
+    : (messageActionDetails[lastMessageIndex] ?? null);
   const footerActionMessageKey = ownsRunFrame
     ? opts.frameActionOwner?.key
     : group.messages[lastMessageIndex]?.key;
@@ -587,6 +590,9 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
               : nothing}
           `;
         })}
+        ${ownsRunFrame || opts.showToolCalls === false
+          ? nothing
+          : renderBrowserTabPreviews([group], opts)}
         ${opts.activeContinuation
           ? renderStreamGroupParts(
               opts.activeContinuation.parts,
@@ -597,7 +603,7 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
             ? renderTurnRecapRow(opts.turnRecap, { presentation: "continuation" })
             : nothing}
       </div>
-      ${normalizedRole === "tool"
+      ${normalizedRole === "tool" || group.isStreaming || opts.activeContinuation
         ? nothing
         : html`<div
             class="chat-group-footer ${persistUserIdentity
@@ -619,10 +625,16 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
                 ? html`<span
                     class="chat-send-status"
                     title=${sendFailure.error ?? nothing}
-                    data-send-state="failed"
+                    data-send-state=${sendFailure.state}
                   >
                     <span aria-hidden="true">·</span>
-                    <span>${t("chat.queue.notSent")}</span>
+                    <span
+                      >${t(
+                        sendFailure.state === "unconfirmed"
+                          ? "chat.queue.deliveryUnconfirmed"
+                          : "chat.queue.notSent",
+                      )}</span
+                    >
                     ${opts.onRetryQueuedMessage
                       ? html`
                           <span aria-hidden="true">·</span>
