@@ -882,7 +882,7 @@ describe("chat pane connection lifecycle", () => {
   });
 
   it("advances session ownership once per same-client connection transition", async () => {
-    const client = { request: vi.fn() } as unknown as GatewayBrowserClient;
+    const client = { request: vi.fn(async () => ({})) } as unknown as GatewayBrowserClient;
     const { pane, state } = createTestChatPane({ client, sessions: {} as SessionCapability });
     const initialGeneration = pane.connectionGeneration;
     const snapshot = { ...pane.context.gateway.snapshot, client };
@@ -1002,7 +1002,7 @@ describe("chat pane connection lifecycle", () => {
   ])(
     "retires pending global model selection state when the selected agent changes for $sessionKey",
     ({ sessionKey, mainKey }) => {
-      const client = { request: vi.fn() } as unknown as GatewayBrowserClient;
+      const client = { request: vi.fn(async () => ({})) } as unknown as GatewayBrowserClient;
       const retireModelOverride = vi.fn();
       const sessions = { retireModelOverride } as unknown as SessionCapability;
       const { state } = createTestChatPane({ client, sessions });
