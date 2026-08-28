@@ -1105,15 +1105,15 @@ extension GatewayProcessManager {
             }
             self.setLaunchAgentReadinessState(candidate: nil, failure: nil)
             self.clearLastFailure()
-            // A completed app install replaces any remembered independent owner.
-            // Audits and pauses otherwise retain ownership until reattachment disproves it.
+            // Only installation evidence replaces a remembered owner. A readiness path
+            // may reuse an independent listener, so its purpose does not establish ownership.
             if installed {
                 self.gatewayOwnership = nil
             }
             self.gatewayOwnership = (
                 context.port,
                 self.installation(
-                    for: context.port, whenMissing: !installed && context.purpose == .attach ? .external : .managed))
+                    for: context.port, whenMissing: installed ? .managed : .external))
             if case .attach = context.purpose {
                 self.existingGatewayDetails = details
                 self.status = .attachedExisting(details: details)

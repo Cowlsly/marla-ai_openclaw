@@ -1650,6 +1650,28 @@ struct GatewayProcessManagerTests {
     }
 
     @Test(arguments: [false, true])
+    func `readiness without a service record uses actual installation evidence`(_ installed: Bool) async throws {
+        let root = try makeTempDirForTests()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let port = try self.availableGatewayPort()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let (_, connection, manager) = self.makeGatewayReadinessFixture(url: url) {
+            self.gatewayTask(healthSucceedsAfter: 0)
+        }
+        defer { manager.setTestingConnection(nil) }
+        try await self.withLaunchAgentEnvironment(port: port, homeDirectory: root) {
+            manager.setTestingSkipControlChannelRefresh(true)
+            defer { manager.setTestingSkipControlChannelRefresh(false) }
+            manager.setTestingStatus(.starting)
+            manager._testBeginGatewayStartGeneration()
+            try #require(GatewayLaunchAgentManager.launchdProgramArguments() == [])
+            #expect(await manager.waitForGatewayReady(timeout: 0.5, launchAgentInstalled: installed))
+            #expect(manager.installation == (installed ? .managed : .external))
+            await connection.shutdown()
+        }
+    }
+
+    @Test(arguments: [false, true])
     func `pause preserves established installation after service removal`(_ managed: Bool) async throws {
         let root = try makeTempDirForTests()
         defer { try? FileManager.default.removeItem(at: root) }
