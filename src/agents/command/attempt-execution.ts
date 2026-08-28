@@ -77,6 +77,7 @@ import {
 } from "../cli-session.js";
 import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
 import { resolveConversationToolPolicies } from "../conversation-tool-policy-pipeline.js";
+import type { DeferredEmbeddedRunLifecycleManager } from "../embedded-agent-runner/run/deferred-lifecycle-owner.js";
 import type { RunEmbeddedAgentInternalParams } from "../embedded-agent-runner/run/internal-params.js";
 import { runEmbeddedAgent, type EmbeddedAgentRunResult } from "../embedded-agent.js";
 import { appendGitCoauthorContext } from "../git-coauthor-attribution.js";
@@ -531,8 +532,9 @@ export function runAgentAttempt(params: {
     stream: string;
     data?: Record<string, unknown>;
     sessionKey?: string;
-  }) => void;
+  }) => void | Promise<void>;
   deferTerminalLifecycle?: boolean;
+  deferredLifecycle?: DeferredEmbeddedRunLifecycleManager;
   authProfileProvider: string;
   sessionStore?: Record<string, SessionEntry>;
   storePath?: string;
@@ -549,7 +551,18 @@ export function runAgentAttempt(params: {
   onUserMessagePersisted?: (message: Extract<AgentMessage, { role: "user" }>) => void;
   onContextEngineTurnCandidate?: (facts: ContextEngineTurnAttemptFacts) => void;
   onLifecycleGenerationChanged?: (lifecycleGeneration: string) => void;
+  onSuccessfulAuthProfile?: (selection: {
+    authProfileId?: string;
+    authProfileIdSource?: "auto" | "user";
+  }) => void;
 }) {
+  const onRuntimeActivity = (info: { phase: string }) => {
+    // CLI preparation and child launch do not prove a native turn. Parsed
+    // assistant/tool activity does, even when the backend omits lifecycle events.
+    if (info.phase === "assistant_output_started" || info.phase === "tool_execution_started") {
+      void params.onAgentEvent({ stream: "lifecycle", data: { phase: "start" } });
+    }
+  };
   const sessionAuthProfileId = params.sessionEntry?.authProfileOverride?.trim();
   const sessionAuthProfileSource = resolveSessionAuthProfileOverrideSource(params.sessionEntry);
   // An explicit session choice owns the conversation. Otherwise the profile
@@ -798,6 +811,7 @@ export function runAgentAttempt(params: {
       ? "openclaw"
       : undefined);
   if (!isRawModelRun && isCliExecutionProvider) {
+    params.deferredLifecycle?.handoffToCli();
     const cliSessionBinding = getCliSessionBinding(params.sessionEntry, cliExecutionProvider);
     const cliProcessCwd = params.cwd ? resolveUserPath(params.cwd) : params.workspaceDir;
     const cliContinuationBody = params.opts.execApprovalContinuationPromptRange
@@ -947,7 +961,9 @@ export function runAgentAttempt(params: {
             runTimeoutOverrideMs: params.runTimeoutOverrideMs,
             runId: params.runId,
             lifecycleGeneration: params.lifecycleGeneration,
+            abortSignal: params.deferredLifecycle?.signal ?? params.opts.abortSignal,
             onExecutionStarted: params.opts.onExecutionStarted,
+            onExecutionPhase: onRuntimeActivity,
             lane: params.opts.lane,
             extraSystemPrompt: params.opts.extraSystemPrompt,
             inputProvenance: params.opts.inputProvenance,
@@ -1255,12 +1271,26 @@ export function runAgentAttempt(params: {
     disableTools,
     allowEmptyAssistantReplyAsSilent: isSubagentLane || isSubagentAnnounceHandoff,
     onAgentEvent: params.onAgentEvent,
+    onExecutionPhase: onRuntimeActivity,
     deferTerminalLifecycle: params.deferTerminalLifecycle,
+    onDeferredLifecycleOwner: params.deferredLifecycle?.adopt,
+    onDeferredLifecycleAbort: params.deferredLifecycle?.abort,
     suppressNextUserMessagePersistence: params.suppressPromptPersistenceOnRetry === true,
     userTurnTranscriptRecorder: params.userTurnTranscriptRecorder,
     contextEngineLogicalTurnLease: params.contextEngineLogicalTurnLease,
     onContextEngineTurnCandidate: params.onContextEngineTurnCandidate,
     onUserMessagePersisted: params.onUserMessagePersisted,
+    onSuccessfulAuthProfile: params.onSuccessfulAuthProfile
+      ? (successfulProfileId) =>
+          params.onSuccessfulAuthProfile?.({
+            authProfileId: successfulProfileId,
+            authProfileIdSource: successfulProfileId
+              ? successfulProfileId === authProfileId
+                ? harnessAuthSelection.authProfileIdSource
+                : "auto"
+              : undefined,
+          })
+      : undefined,
     onExecutionStarted: (info) => {
       params.opts.onExecutionStarted?.();
       if (info?.lifecycleGeneration) {

@@ -7,7 +7,12 @@ import { GPT5_BEHAVIOR_CONTRACT as CODEX_GPT5_BEHAVIOR_CONTRACT } from "openclaw
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { codexCatalogHomeId } from "../session-catalog-home-id.js";
 import { resolveCodexAppServerHomeDir } from "./auth-start-options.js";
+import {
+  ensureCodexAppServerClientRuntime,
+  retainCodexAppServerLiveThread,
+} from "./client-runtime.js";
 import { CodexAppServerRpcError } from "./client.js";
+import { createFakeCodexAppServerClient } from "./codex-app-server.test-fixtures.js";
 import { createCodexTestHostCapabilities } from "./host-capability.test-support.js";
 import { buildCodexAppServerConnectionFingerprint } from "./plugin-app-cache-key.js";
 import type { CodexPluginThreadConfig } from "./plugin-thread-config.js";
@@ -538,7 +543,12 @@ describe("Codex delegation capability", () => {
       "tools.experimental_request_user_input.enabled": true,
       "tools.update_plan.enabled": true,
       mcp_servers: {
-        "local-example": { command: "example-mcp" },
+        "local-example": {
+          command: "example-mcp",
+          args: ["--stdio"],
+          cwd: "/repo/mcp",
+          env: { MCP_MODE: "restricted" },
+        },
       },
       web_search: "live",
     };
@@ -580,7 +590,15 @@ describe("Codex delegation capability", () => {
         expect(request.config?.[disabledFeature]).toBe(false);
       }
       expect(request.config?.web_search).toBe("disabled");
-      expect(request.config?.mcp_servers).toEqual({ "local-example": { enabled: false } });
+      expect(request.config?.mcp_servers).toEqual({
+        "local-example": {
+          command: "example-mcp",
+          args: ["--stdio"],
+          cwd: "/repo/mcp",
+          env: { MCP_MODE: "restricted" },
+          enabled: false,
+        },
+      });
       expect(request.developerInstructions).toContain("`message(action=send)`");
       expect(request.developerInstructions).not.toContain("`spawn_agent`");
       expect(request.developerInstructions).not.toContain("`tool_search`");
@@ -608,7 +626,14 @@ describe("Codex delegation capability", () => {
       expect(normal.config?.["features.multi_agent_v2"]).toBe(true);
       expect(normal.config?.["features.plugins"]).toBe(true);
       expect(normal.config?.["tools.update_plan.enabled"]).toBe(false);
-      expect(normal.config?.mcp_servers).toEqual({ "local-example": { command: "example-mcp" } });
+      expect(normal.config?.mcp_servers).toEqual({
+        "local-example": {
+          command: "example-mcp",
+          args: ["--stdio"],
+          cwd: "/repo/mcp",
+          env: { MCP_MODE: "restricted" },
+        },
+      });
       expect(normal.developerInstructions).toContain("`spawn_agent`");
     }
   });
@@ -1990,32 +2015,114 @@ describe("Codex app-server native code mode config", () => {
 });
 
 describe("Codex app-server turn input image sanitizing", () => {
-  it("carries native workspace temporary-root overrides into turn policy", () => {
-    const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
-      threadId: "thread-1",
-      cwd: "/tmp/qa/workspace",
-      appServer: {
-        ...createAppServerOptions(),
-        start: {
-          args: [
-            "app-server",
-            "-c",
-            "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-            "-c",
-            "sandbox_workspace_write.exclude_slash_tmp=true",
-          ],
-        },
-      } as never,
-    });
+  const excludedTmpStart = {
+    args: [
+      "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "-csandbox_workspace_write.exclude_slash_tmp=true",
+      "app-server",
+    ],
+  };
 
-    expect(request.sandboxPolicy).toEqual({
-      type: "workspaceWrite",
-      writableRoots: ["/tmp/qa/workspace"],
-      networkAccess: false,
-      excludeTmpdirEnvVar: true,
-      excludeSlashTmp: true,
-    });
-  });
+  it.each([
+    {
+      name: "separate",
+      args: [
+        "-c",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config",
+        "sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: true,
+    },
+    {
+      name: "attached short",
+      args: [
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "-c=sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: true,
+    },
+    {
+      name: "mixed last true",
+      args: [
+        "--config=sandbox_workspace_write.exclude_tmpdir_env_var=false",
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: true,
+    },
+    {
+      name: "mixed last false",
+      args: [
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=false",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+        "-c=sandbox_workspace_write.exclude_slash_tmp=false",
+      ],
+      excluded: false,
+    },
+    {
+      name: "commented true across separate and attached forms",
+      args: [
+        "-c",
+        "sandbox_workspace_write.exclude_tmpdir_env_var = false # earlier",
+        "--config=sandbox_workspace_write.exclude_tmpdir_env_var = true # exclusion retained",
+        "--config",
+        "sandbox_workspace_write.exclude_slash_tmp = false # earlier",
+        "-c=sandbox_workspace_write.exclude_slash_tmp = true # exclusion retained",
+      ],
+      excluded: true,
+    },
+    {
+      name: "commented false wins last",
+      args: [
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=false # explicit last value",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+        "-csandbox_workspace_write.exclude_slash_tmp=false # explicit last value",
+      ],
+      excluded: false,
+    },
+    {
+      name: "quoted booleans remain strings",
+      args: [
+        '-csandbox_workspace_write.exclude_tmpdir_env_var="true" # not a boolean',
+        "--config=sandbox_workspace_write.exclude_slash_tmp='true' # not a boolean",
+      ],
+      excluded: false,
+    },
+    {
+      name: "option value and terminator",
+      args: [
+        "--ws-issuer",
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: false,
+    },
+  ])(
+    "carries native workspace temporary-root overrides into turn policy: $name",
+    ({ args, excluded }) => {
+      const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
+        threadId: "thread-1",
+        cwd: "/tmp/qa/workspace",
+        appServer: {
+          ...createAppServerOptions(),
+          start: { args: ["app-server", ...args] },
+        } as never,
+      });
+      expect(request.sandboxPolicy).toEqual({
+        type: "workspaceWrite",
+        writableRoots: ["/tmp/qa/workspace"],
+        networkAccess: false,
+        excludeTmpdirEnvVar: excluded,
+        excludeSlashTmp: excluded,
+      });
+    },
+  );
 
   it("preserves implicit temporary writable roots for ordinary Codex turns", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
@@ -2037,7 +2144,10 @@ describe("Codex app-server turn input image sanitizing", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
-      appServer: createAppServerOptions() as never,
+      appServer: {
+        ...createAppServerOptions(),
+        start: excludedTmpStart,
+      } as never,
       sandboxPolicy: {
         type: "workspaceWrite",
         writableRoots: ["/repo"],
@@ -2060,7 +2170,10 @@ describe("Codex app-server turn input image sanitizing", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
-      appServer: createNetworkProxyAppServerOptions() as never,
+      appServer: {
+        ...createNetworkProxyAppServerOptions(),
+        start: excludedTmpStart,
+      } as never,
     });
 
     expect(request).not.toHaveProperty("permissions");
@@ -2071,7 +2184,10 @@ describe("Codex app-server turn input image sanitizing", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
-      appServer: createNetworkProxyAppServerOptions() as never,
+      appServer: {
+        ...createNetworkProxyAppServerOptions(),
+        start: excludedTmpStart,
+      } as never,
       sandboxPolicy: {
         type: "externalSandbox",
         networkAccess: "enabled",
@@ -3344,38 +3460,62 @@ describe("Codex app-server adopted thread lifecycle", () => {
     });
   });
 
-  it("rejects an adopted thread that is active in another runner before reserving it", async () => {
-    const sessionFile = path.join(tempDir, "session.jsonl");
-    const workspaceDir = path.join(tempDir, "workspace");
-    const params = createThreadLifecycleParams(sessionFile, workspaceDir);
-    const { threadId } = await seedAdoptedThreadBinding(params, workspaceDir);
-    const request = vi.fn(async (method: string, _requestParams?: unknown) => {
-      if (method === "thread/read") {
-        return {
-          thread: {
-            ...threadStartResult(threadId).thread,
-            status: { type: "active" },
-          },
-        };
+  it.each([
+    { status: "active", canAcceptDirectInput: true, error: "active in another runner" },
+    { status: "idle", canAcceptDirectInput: false, error: "controlled by its parent" },
+  ])(
+    "preserves retained adopted ownership when native preflight rejects: $status",
+    async ({ status, canAcceptDirectInput, error }) => {
+      const sessionFile = path.join(tempDir, "session.jsonl");
+      const workspaceDir = path.join(tempDir, "workspace");
+      const params = createThreadLifecycleParams(sessionFile, workspaceDir);
+      const { identity, threadId } = await seedAdoptedThreadBinding(params, workspaceDir);
+      const harness = createFakeCodexAppServerClient(async (method: string) => {
+        if (method === "thread/read") {
+          return {
+            thread: {
+              ...threadStartResult(threadId).thread,
+              status: { type: status },
+              canAcceptDirectInput,
+            },
+          };
+        }
+        if (method === "thread/unsubscribe") {
+          return { status: "unsubscribed" };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      });
+      ensureCodexAppServerClientRuntime(harness.client, { agentDir: workspaceDir });
+      await testCodexAppServerBindingStore.mutate(identity, {
+        kind: "patch",
+        threadId,
+        patch: { clientId: harness.client.getInstanceId() },
+      });
+      const release = vi.fn();
+      await retainCodexAppServerLiveThread(harness.client, threadId, release);
+      const reserveResumeThread = vi.fn(() => ({ release: vi.fn() }));
+      const before = await testCodexAppServerBindingStore.read(identity);
+      try {
+        await expect(
+          startOrResumeThread({
+            client: harness.client,
+            reserveResumeThread,
+            params,
+            cwd: workspaceDir,
+            dynamicTools: [],
+            appServer: createThreadLifecycleAppServerOptions(),
+          }),
+        ).rejects.toThrow(error);
+
+        expect(harness.request.mock.calls.map(([method]) => method)).toEqual(["thread/read"]);
+        expect(release).not.toHaveBeenCalled();
+        expect(await testCodexAppServerBindingStore.read(identity)).toEqual(before);
+        expect(reserveResumeThread).not.toHaveBeenCalled();
+      } finally {
+        harness.close();
       }
-      throw new Error(`unexpected method: ${method}`);
-    });
-    const reserveResumeThread = vi.fn(() => ({ release: vi.fn() }));
-
-    await expect(
-      startOrResumeThread({
-        client: { request } as never,
-        reserveResumeThread,
-        params,
-        cwd: workspaceDir,
-        dynamicTools: [],
-        appServer: createThreadLifecycleAppServerOptions(),
-      }),
-    ).rejects.toThrow("active in another runner");
-
-    expect(request.mock.calls.map(([method]) => method)).toEqual(["thread/read"]);
-    expect(reserveResumeThread).not.toHaveBeenCalled();
-  });
+    },
+  );
 });
 
 describe("Codex app-server supervised branch lifecycle", () => {
@@ -3667,7 +3807,7 @@ describe("Codex app-server supervised branch lifecycle", () => {
         project_doc_max_bytes: 0,
         mcp_servers: {
           inherited: { enabled: false },
-          "request-only": { enabled: false },
+          "request-only": { command: "request-mcp", enabled: false },
         },
       });
     }

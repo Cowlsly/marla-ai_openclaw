@@ -143,6 +143,8 @@ export function createPageState(
   const appConfig = context.config.current;
   const state = {
     sessions: context.sessions,
+    hasPendingInitialTurn: (sessionKey: string) =>
+      context.placementStartup.hasPendingTurn(sessionKey),
     initialUserMessage: context.initialUserMessage,
     settings,
     password: "",
@@ -227,6 +229,7 @@ export function createPageState(
     pendingAbort: null,
     pendingSessionMessageReloadSessionKey: null,
     chatSubmitGuards: new Map<string, Promise<void>>(),
+    chatGoalDraftMode: null,
     chatSendTimingsByRun: new Map(),
     chatQueue: [],
     chatComposerFallbackByScope: {},
@@ -246,15 +249,12 @@ export function createPageState(
     chatScrollCommitCleanup: null,
     chatStreamRenderFrame: null,
     chatScrollFrame: null,
-    chatScrollGuardFrame: null,
     chatScrollGeneration: 0,
     chatLastScrollTop: 0,
     chatLastScrollHeight: 0,
     chatHasAutoScrolled: false,
     chatUserNearBottom: true,
     chatFollowLocked: false,
-    chatIsProgrammaticScroll: false,
-    chatProgrammaticScrollTarget: 0,
     sidebarLayout: normalizeSidebarLayout(settings.sidebarSessionLayouts?.[sidebarSessionKey]),
     sidebarContent: null,
     attachmentSidebarContent: null,

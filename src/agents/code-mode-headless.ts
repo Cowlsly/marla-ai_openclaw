@@ -30,6 +30,7 @@ import {
 } from "./code-mode-runtime.js";
 import {
   cancelPendingBridgeStates,
+  cancelPendingBridgeStatesById,
   createCodeModeBridgeDispatchState,
   createPendingBridgeStates,
   pendingBridgeStatesForSettlement,
@@ -220,6 +221,7 @@ export async function runCodeModeScriptHeadless(params: {
     const codeModeRunId = `cm_headless_${randomUUID()}`;
     const runtime = new ToolSearchRuntime(params.ctx, toToolSearchConfig(config), {
       prepareInput: true,
+      validateInput: true,
     });
     const bridgeDispatch = createCodeModeBridgeDispatchState();
     const namespaceCatalog = runtime.namespaceEntries();
@@ -282,6 +284,7 @@ export async function runCodeModeScriptHeadless(params: {
       }
 
       enforceSnapshotPayloadLimits({ snapshotBytes: result.snapshotBytes, config });
+      cancelPendingBridgeStatesById(pending, result.canceledRequestIds);
       const pendingIds = new Set(pending.map((entry) => entry.id));
       const newRequests = result.pendingRequests.filter((request) => !pendingIds.has(request.id));
       // Node discovery invokes the generic nodes tool for live status too;

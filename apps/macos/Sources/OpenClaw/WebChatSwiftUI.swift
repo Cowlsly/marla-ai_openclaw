@@ -277,7 +277,7 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
         search: String?,
         archived: Bool) async throws -> OpenClawChatSessionsListResponse
     {
-        let request = OpenClawChatGatewayRequests.sessionsList(
+        let request = self.sessionsListRequest(
             limit: limit,
             search: search,
             archived: archived)
@@ -307,6 +307,18 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
             hasMore: decoded.hasMore,
             defaults: defaults,
             sessions: decoded.sessions)
+    }
+
+    func sessionsListRequest(
+        limit: Int?,
+        search: String?,
+        archived: Bool) -> OpenClawChatGatewayRequest
+    {
+        OpenClawChatGatewayRequests.sessionsList(
+            limit: limit,
+            search: search,
+            archived: archived,
+            agentID: self.routingIdentity.currentAgentID())
     }
 
     func listChildSessions(parentKey: String) async throws -> [OpenClawChatSessionEntry] {
@@ -889,7 +901,7 @@ private struct MacChatSurface: View {
     var body: some View {
         OpenClawChatWindowShell(
             viewModel: self.viewModel,
-            userAccent: ColorHexSupport.color(fromHex: self.appState.seamColorHex),
+            userAccent: ColorHexSupport.color(fromHex: self.appState.effectiveAccentHex),
             displayOptions: self.displayOptions,
             emptyAssistantIntro: Self.emptyAssistantIntro,
             emptyAssistantPrompts: Self.emptyAssistantPrompts,
@@ -1149,6 +1161,11 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
                         cachedDefaultAgentID: routingIdentity.defaultAgentID)
                     (transport as? MacGatewayChatTransport)?
                         .updateDefaultGlobalAgentID(effectiveAgentID)
+                    // Keep request and cache ownership in lockstep before the
+                    // persistence await can admit a roster refresh.
+                    vm.syncDeliveryIdentity(
+                        activeAgentId: effectiveAgentID,
+                        sessionRoutingContract: routingIdentity.contract)
                     if let store = transcriptCache as? OpenClawChatSQLiteTranscriptCache,
                        !usesPrimaryAppRuntime || store.gatewayID == MacChatTranscriptCache.currentGatewayID(),
                        let persistedIdentity = OpenClawChatSessionRoutingIdentity(
@@ -1156,9 +1173,6 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
                     {
                         await store.storeSessionRoutingIdentity(persistedIdentity)
                     }
-                    vm.syncDeliveryIdentity(
-                        activeAgentId: effectiveAgentID,
-                        sessionRoutingContract: routingIdentity.contract)
                 }
             }
         }

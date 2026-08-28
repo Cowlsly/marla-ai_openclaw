@@ -10,7 +10,7 @@ import "../components/github-link-hovercard-registration.ts";
 import "../components/login-gate.ts";
 import "../components/openclaw-mascot.ts";
 import { renderLazyElementState } from "../components/lazy-view-error.ts";
-import { installNativeTitleGuard } from "../components/tooltip.ts";
+import { installTitleTooltips } from "../components/tooltip-title.ts";
 import { t } from "../i18n/index.ts";
 import { formatUiError } from "../lib/format-error.ts";
 import { normalizeAgentId } from "../lib/sessions/session-key.ts";
@@ -18,7 +18,6 @@ import { isTerminalAvailable } from "../lib/terminal-availability.ts";
 import { OpenClawLightDomElement } from "../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../lit/subscriptions-controller.ts";
 import type { ChatRouteData } from "../pages/chat/route-loader.ts";
-import { isDesktopPanelAvailable } from "./app-shell-chrome.ts";
 import { bootstrapApplication, type ApplicationRuntime } from "./bootstrap.ts";
 import { applicationContext, type ApplicationContext } from "./context.ts";
 import {
@@ -32,6 +31,7 @@ import {
   TERMINAL_PANEL_ELEMENT,
 } from "./lazy-custom-element.ts";
 import { resolveOnboardingMode } from "./onboarding-mode.ts";
+import { isDesktopPanelAvailable } from "./panel-availability.ts";
 
 type FocusDashboardRouteState =
   | { kind: "loading" }
@@ -120,7 +120,7 @@ export class OpenClawApp extends OpenClawLightDomElement {
         () => (this.terminalOnly ? this.context?.theme : undefined),
         (theme, notify) => theme.subscribe(notify),
       )
-      .effect(() => this.ownerDocument, installNativeTitleGuard);
+      .effect(() => this.ownerDocument, installTitleTooltips);
   }
 
   override connectedCallback() {
@@ -310,7 +310,7 @@ export class OpenClawApp extends OpenClawLightDomElement {
       if (controller.signal.aborted || this.focusDashboardAbort !== controller) {
         return;
       }
-      if (isRouteNotFound(result)) {
+      if (isRouteNotFound(result) || result.kind === "missing-session") {
         this.focusDashboardRoute = { kind: "not-found" };
         return;
       }

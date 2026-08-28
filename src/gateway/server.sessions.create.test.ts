@@ -28,9 +28,14 @@ import {
 } from "../config/sessions/session-accessor.sqlite-scope.js";
 import { addSessionMember, removeSessionMember } from "../config/sessions/session-sharing-store.js";
 import { resolveSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
+import { withTimeout } from "../infra/fs-safe.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { isSessionLifecycleMutationActive } from "../sessions/session-lifecycle-admission.js";
+import {
+  getSessionWorkAdmissionRelease,
+  isSessionLifecycleMutationActive,
+  SESSION_WORK_ADMISSION_DRAIN_TIMEOUT_MS,
+} from "../sessions/session-lifecycle-admission.js";
 import { listSessionStateEventsSince } from "../sessions/session-state-events.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
@@ -39,10 +44,15 @@ import {
   openOpenClawAgentDatabase,
   resolveIncognitoOpenClawAgentSqlitePath,
 } from "../state/openclaw-agent-db.js";
-import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  openOpenClawStateDatabase,
+} from "../state/openclaw-state-db.js";
 import { ensureProfileForEmail, setUserProfileRole } from "../state/user-profiles.js";
 import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
+import { waitForChatAbortControllerRemoval } from "./chat-abort-lifecycle-internal.js";
+import type { ChatAbortControllerEntry } from "./chat-abort.js";
 import {
   attachGatewayLocalUserIngress,
   prepareGatewayLocalUserIngress,
@@ -76,6 +86,7 @@ import {
   seedSessionTranscript,
   threadBindingMocks,
 } from "./test/server-sessions.test-helpers.js";
+import { createWorkerSessionPlacementStore } from "./worker-environments/placement-store.js";
 
 type EnsureSessionDiffBaseline =
   (typeof import("../sessions/session-diff-baseline.js"))["ensureSessionDiffBaseline"];
@@ -150,6 +161,30 @@ const execFileAsync = promisify(execFile);
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 let gitWorkspaceTemplateRoot: string;
 let gitWorkspaceTemplate: string;
+
+async function waitForCreatedSessionRun(
+  context: { chatAbortControllers: Map<string, ChatAbortControllerEntry> },
+  storePath: string,
+  sessionKey: string | undefined,
+) {
+  const released = getSessionWorkAdmissionRelease({
+    scope: storePath,
+    identities: [sessionKey],
+  });
+  const removed = await waitForChatAbortControllerRemoval({
+    entries: context.chatAbortControllers,
+    targets: [...context.chatAbortControllers].map(([runId, entry]) => ({ runId, entry })),
+    timeoutMs: SESSION_WORK_ADMISSION_DRAIN_TIMEOUT_MS,
+  });
+  if (released) {
+    await withTimeout(
+      released,
+      SESSION_WORK_ADMISSION_DRAIN_TIMEOUT_MS,
+      "worktree title run cleanup",
+    );
+  }
+  return removed;
+}
 
 beforeAll(async () => {
   gitWorkspaceTemplateRoot = await fs.realpath(
@@ -1749,7 +1784,8 @@ test("sessions.create provisions and reuses a session worktree for later runs", 
     const worktree = created.payload?.worktree;
     expect(worktree?.branch).toBe("openclaw/release-planning");
     expect(created.payload?.entry.spawnedCwd).toBe(worktree?.path);
-    expect(created.payload?.entry.permissionMode).toBe("workspace");
+    expect(created.payload?.entry.permissionMode).toBeUndefined();
+    expect(loadSessionEntry({ sessionKey: key, storePath })?.permissionMode).toBeUndefined();
     expect(created.payload?.entry.sessionRoot).toBe(worktree?.path);
     worktreeId = worktree?.id;
     expect(findLiveRegistryWorktreeByOwner(process.env, "session", key)).toMatchObject({
@@ -1951,7 +1987,7 @@ test("sessions.create runs an existing managed worktree cwd for initial and foll
   }
 });
 
-test("sessions.create preserves a committed worktree when initial-turn setup fails", async () => {
+test("sessions.create preserves pending worktree intent when initial-turn admission fails", async () => {
   const openClawState = await createOpenClawTestState({
     layout: "state-only",
     prefix: "openclaw-session-worktree-post-commit-failure-",
@@ -1961,7 +1997,6 @@ test("sessions.create preserves a committed worktree when initial-turn setup fai
   testState.agentConfig = { workspace };
   const { storePath } = await createSessionStoreDir();
   const key = "agent:main:dashboard:post-commit-worktree";
-  let worktreeId: string | undefined;
   sessionTranscriptReaderMocks.readCount.mockRejectedValueOnce(
     new Error("synthetic post-commit initial-turn failure"),
   );
@@ -1997,22 +2032,10 @@ test("sessions.create preserves a committed worktree when initial-turn setup fai
 
     expect(loadSessionEntry({ sessionKey: key, storePath })).toMatchObject({
       sessionId: expect.any(String),
-      worktree: { id: expect.any(String), branch: "openclaw/post-commit-worktree" },
+      pendingWorktree: { name: "post-commit-worktree", workspace },
     });
-    const owned = findLiveRegistryWorktreeByOwner(process.env, "session", key);
-    expect(owned).toBeDefined();
-    await expect(
-      fs.stat(requireNonEmptyString(owned?.path, "committed worktree path")),
-    ).resolves.toBeDefined();
-    worktreeId = owned?.id;
+    expect(findLiveRegistryWorktreeByOwner(process.env, "session", key)).toBeUndefined();
   } finally {
-    if (worktreeId) {
-      await managedWorktrees.remove({
-        id: worktreeId,
-        reason: "test-cleanup",
-        allowSnapshotLoss: true,
-      });
-    }
     closeOpenClawStateDatabaseForTest();
     testState.agentConfig = undefined;
     await openClawState.cleanup();
@@ -2138,7 +2161,9 @@ test.each([
       });
     }
     let worktreeId: string | undefined;
+    let sessionKey: string | undefined;
     const pastedText = `Pasted deployment plan ${"x".repeat(2_000)}`;
+    const context = { chatAbortControllers: new Map<string, ChatAbortControllerEntry>() };
     const message = "Review this rollout [[reply_to_current]]";
     const attachment = {
       type: "file",
@@ -2146,6 +2171,7 @@ test.each([
       content: Buffer.from(pastedText).toString("base64"),
     };
     dashboardTitleGenerationMocks.generate.mockResolvedValueOnce("Attachment Repair");
+    const dispatchCountBefore = dispatchInboundMessageMock.mock.calls.length;
     dispatchInboundMessageMock.mockResolvedValueOnce({
       queuedFinal: false,
       counts: { block: 0, final: 0, tool: 0 },
@@ -2159,7 +2185,8 @@ test.each([
           agentRuntimeOverride?: string;
           authProfileOverride?: string;
         };
-        worktree: { id: string; branch: string };
+        runId: string;
+        runStarted: boolean;
       }>(
         "sessions.create",
         {
@@ -2169,23 +2196,29 @@ test.each([
           attachments: [attachment],
           ...request,
         },
-        { client: { connect: { scopes: ["operator.admin"] } } as never },
+        { client: { connect: { scopes: ["operator.admin"] } } as never, context },
       );
 
       expect(created.ok, JSON.stringify(created.error)).toBe(true);
-      worktreeId = created.payload?.worktree.id;
-      expect(created.payload?.worktree.branch).toBe("openclaw/attachment-repair");
       expect(created.payload?.entry).toMatchObject(expectedEntry);
-      const sessionKey = requireNonEmptyString(created.payload?.key, "created session key");
-      await waitForFast(() => expect(dashboardTitleScheduleMocks.schedule).toHaveBeenCalled());
+      expect(created.payload, JSON.stringify(created.payload)).toMatchObject({ runStarted: true });
+      sessionKey = requireNonEmptyString(created.payload?.key, "created session key");
+      expect(await waitForCreatedSessionRun(context, storePath, sessionKey)).toBe(true);
       expect(loadSessionEntry({ agentId: "main", sessionKey, storePath })).toMatchObject({
         displayName: "Attachment Repair",
+        worktree: { branch: "openclaw/attachment-repair" },
       });
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(dispatchCountBefore + 1);
+      worktreeId = loadSessionEntry({ agentId: "main", sessionKey, storePath })?.worktree?.id;
       expect(dashboardTitleGenerationMocks.generate).toHaveBeenCalledWith(
         expect.objectContaining({ timeoutMs: 4_000, ...expectedTitleSelection }),
       );
       expect(dashboardTitleGenerationMocks.generate).toHaveBeenCalledOnce();
     } finally {
+      for (const entry of context.chatAbortControllers.values()) {
+        entry.controller.abort();
+      }
+      expect(await waitForCreatedSessionRun(context, storePath, sessionKey)).toBe(true);
       if (worktreeId) {
         await managedWorktrees.remove({
           id: worktreeId,
@@ -2267,13 +2300,12 @@ test.each([
     const workspace = await initializeGitWorkspace(openClawState.root);
     closeOpenClawStateDatabaseForTest();
     testState.agentConfig = { workspace };
-    await createSessionStoreDir();
-    const { ws } = await openClient({ scopes: ["operator.admin"] });
+    const { storePath } = await createSessionStoreDir();
+    const context = { chatAbortControllers: new Map<string, ChatAbortControllerEntry>() };
     let worktreeId: string | undefined;
     arrange();
     try {
-      const created = await rpcReq<{ worktree: { id: string; branch: string } }>(
-        ws,
+      const created = await directSessionReq<{ runStarted: boolean }>(
         "sessions.create",
         {
           agentId: "main",
@@ -2281,13 +2313,21 @@ test.each([
           worktree: true,
           message: "Investigate the raw fallback title",
         },
+        { client: { connect: { scopes: ["operator.admin"] } } as never, context },
       );
 
       expect(created.ok, JSON.stringify(created.error)).toBe(true);
-      worktreeId = created.payload?.worktree.id;
-      expect(created.payload?.worktree.branch).toBe("openclaw/investigate-the-raw-fallback-title");
+      expect(created.payload?.runStarted).toBe(true);
+      expect(await waitForCreatedSessionRun(context, storePath, key)).toBe(true);
+      const worktree = loadSessionEntry({ sessionKey: key, storePath })?.worktree;
+      worktreeId = worktree?.id;
+      expect(worktree?.branch).toBe("openclaw/investigate-the-raw-fallback-title");
       expect(dashboardTitleGenerationMocks.generate).toHaveBeenCalledOnce();
     } finally {
+      for (const entry of context.chatAbortControllers.values()) {
+        entry.controller.abort();
+      }
+      expect(await waitForCreatedSessionRun(context, storePath, key)).toBe(true);
       if (worktreeId) {
         await managedWorktrees.remove({
           id: worktreeId,
@@ -2297,7 +2337,6 @@ test.each([
       }
       closeOpenClawStateDatabaseForTest();
       testState.agentConfig = undefined;
-      ws.close();
       await openClawState.cleanup();
     }
   },
@@ -2383,6 +2422,7 @@ test("sessions.create maps worktree options and preserves a nested workspace cwd
         worktree: true,
         worktreeName: "target-task",
         worktreeBaseRef: "base-branch",
+        permissionMode: "workspace",
       },
       { client: { connect: { scopes: ["operator.admin"] } } as never },
     );
@@ -2649,6 +2689,32 @@ test("sessions.create persists a canonical Gateway cwd without a managed worktre
       }
     )?.entry,
   ).toMatchObject({ sessionRoot: cwd, spawnedCwd: cwd });
+});
+
+test("sessions.create rejects a regular-file Gateway cwd before creating session state", async () => {
+  const root = tempDirs.make("openclaw-session-file-cwd-");
+  const cwd = path.join(root, "workspace.txt");
+  const key = "agent:main:dashboard:file-cwd";
+  await fs.writeFile(cwd, "not a directory\n");
+  const { storePath } = await createSessionStoreDir();
+  const { ws } = await openClient({
+    scopes: ["operator.admin"],
+    deviceIdentityPath: path.join(root, "device.json"),
+  });
+  try {
+    const created = await rpcReq(ws, "sessions.create", { agentId: "main", key, cwd });
+
+    expect(created).toMatchObject({
+      ok: false,
+      error: {
+        code: "INVALID_REQUEST",
+        message: "sessions.create cwd is not a directory",
+      },
+    });
+    expect(loadSessionEntry({ agentId: "main", sessionKey: key, storePath })).toBeUndefined();
+  } finally {
+    ws.close();
+  }
 });
 
 test("sessions.create allows a write-scoped cwd inside the configured workspace", async () => {
@@ -3009,6 +3075,7 @@ test("sessions.create reset-in-place detaches the prior worktree permission boun
         parentSessionKey: "main",
         emitCommandHooks: true,
         worktree: true,
+        permissionMode: "workspace",
       },
       { client: { connect: { scopes: ["operator.admin"] } } as never },
     );
@@ -3455,6 +3522,126 @@ test("sessions.create commits no session after delegated authority closes", asyn
   expect(
     loadCombinedSessionStoreForGatewayCore(getRuntimeConfig()).store[sessionKey],
   ).toBeUndefined();
+});
+
+test("sessions.create commits no child after its bound Gateway is replaced", async () => {
+  const { storePath } = await createSessionStoreDir();
+  const sessionKey = "agent:main:dashboard:gateway-replacement-race";
+  const admitted = {};
+  const replacement = {};
+  let current = admitted;
+  let guardCalls = 0;
+  const firstGuard = createDeferredCore();
+  const writerEntered = createDeferredCore();
+  const releaseWriter = createDeferredCore();
+  const resolvedStore = resolveSqliteStoreScope(storePath, { agentId: "main" });
+  const heldWriter = runExclusiveSqliteSessionWrite(resolvedStore, async () => {
+    writerEntered.resolve();
+    await releaseWriter.promise;
+  });
+  await writerEntered.promise;
+  const creating = directSessionReq(
+    "sessions.create",
+    { agentId: "main", key: sessionKey },
+    {
+      sessionMutationAuthorization: {
+        assertCurrent: () => {
+          if (current !== admitted) {
+            throw new Error("current gateway instance binding was replaced");
+          }
+          guardCalls += 1;
+          if (guardCalls === 1) {
+            firstGuard.resolve();
+          }
+        },
+        assertTargetCurrent: vi.fn(),
+      },
+    },
+  );
+
+  await firstGuard.promise;
+  current = replacement;
+  releaseWriter.resolve();
+  await heldWriter;
+
+  await expect(creating).rejects.toThrow("current gateway instance binding was replaced");
+  expect(loadSessionEntry({ agentId: "main", sessionKey, storePath })).toBeUndefined();
+});
+
+test("sessions.create commits no child after its worker turn closes", async () => {
+  const { storePath } = await createSessionStoreDir();
+  const sessionKey = "agent:main:dashboard:worker-turn-race";
+  const placements = createWorkerSessionPlacementStore({
+    database: openOpenClawStateDatabase(),
+  });
+  let placement = placements.startDispatch({
+    agentId: "main",
+    sessionId: "worker-source-session",
+    sessionKey: "agent:main:dashboard:worker-source",
+  });
+  for (const [from, to, patch] of [
+    ["requested", "provisioning", { environmentId: "worker-environment" }],
+    ["provisioning", "syncing", { workerBundleHash: "a".repeat(64) }],
+    [
+      "syncing",
+      "starting",
+      { remoteWorkspaceDir: "/workspace/source", workspaceBaseManifestRef: "manifest-source" },
+    ],
+    ["starting", "active", { activeOwnerEpoch: 7 }],
+  ] as const) {
+    placement = placements.transition({
+      sessionId: placement.sessionId,
+      from,
+      to,
+      expectedGeneration: placement.generation,
+      patch,
+    });
+  }
+  const turnClaim = placements.claimTurn({
+    agentId: placement.agentId,
+    sessionId: placement.sessionId,
+    sessionKey: placement.sessionKey,
+    claimId: "worker-claim",
+    runId: "worker-run",
+    owner: { kind: "worker", environmentId: "worker-environment", ownerEpoch: 7 },
+  });
+  let guardCalls = 0;
+  const firstGuard = createDeferredCore();
+  const writerEntered = createDeferredCore();
+  const releaseWriter = createDeferredCore();
+  const heldWriter = runExclusiveSqliteSessionWrite(
+    resolveSqliteStoreScope(storePath, { agentId: "main" }),
+    async () => {
+      writerEntered.resolve();
+      await releaseWriter.promise;
+    },
+  );
+  await writerEntered.promise;
+  const creating = directSessionReq(
+    "sessions.create",
+    { agentId: "main", key: sessionKey },
+    {
+      sessionMutationAuthorization: {
+        assertCurrent: () => {
+          if (!placements.validateTurnClaim(turnClaim)) {
+            throw new Error("worker turn authority changed");
+          }
+          if (++guardCalls === 1) {
+            firstGuard.resolve();
+          }
+        },
+        assertTargetCurrent: vi.fn(),
+      },
+    },
+  );
+
+  await firstGuard.promise;
+  placements.releaseTurn(turnClaim);
+  releaseWriter.resolve();
+  await heldWriter;
+
+  await expect(creating).rejects.toThrow("worker turn authority changed");
+  expect(loadSessionEntry({ agentId: "main", sessionKey, storePath })).toBeUndefined();
 });
 
 test("sessions.create starts no initial turn when authority closes after session commit", async () => {
@@ -4368,29 +4555,40 @@ test("sessions.create stamps trusted operator provenance and records created", a
   });
   expect(synthetic.payload?.entry?.createdActor).toBeUndefined();
 
-  const hinted = await directSessionReq<{
-    entry?: { createdVia?: string; createdActor?: unknown };
-  }>(
-    "sessions.create",
-    { agentId: "main" },
-    {
-      client: {
-        connect: { scopes: ["operator.write"] },
-        internal: {
-          syntheticClient: true,
-          sessionCreation: {
-            via: "spawn",
-            actor: { type: "agent", id: "main" },
-            requesterSessionKey: "agent:main:main",
+  for (const { actor, sandbox } of [
+    { actor: { type: "agent", id: "main" }, sandbox: undefined },
+    { actor: { type: "human", id: "profile-delegated-creator" }, sandbox: "required" },
+  ] as const) {
+    // The required parent's creation policy survives removal of gateway.roles.
+    const hinted = await directSessionReq<{
+      key?: string;
+      entry?: { createdVia?: string; createdActor?: unknown; sandbox?: "required" };
+    }>(
+      "sessions.create",
+      { agentId: "main" },
+      {
+        client: {
+          connect: { scopes: ["operator.write"] },
+          internal: {
+            syntheticClient: true,
+            sessionCreation: {
+              via: "spawn",
+              actor,
+              sandbox,
+              requesterSessionKey: "agent:main:main",
+            },
           },
-        },
-      } as never,
-    },
-  );
-  expect(hinted.payload?.entry).toMatchObject({
-    createdVia: "spawn",
-    createdActor: { type: "agent", id: "main" },
-  });
+        } as never,
+      },
+    );
+    expect(hinted.ok, JSON.stringify(hinted.error)).toBe(true);
+    expect(hinted.payload?.entry).toMatchObject({ createdVia: "spawn", createdActor: actor });
+    expect(hinted.payload?.entry?.sandbox).toBe(sandbox);
+    const hintedKey = requireNonEmptyString(hinted.payload?.key, "delegated session key");
+    const stored = loadSessionEntry({ sessionKey: hintedKey, storePath });
+    expect(stored).toMatchObject({ createdVia: "spawn", createdActor: actor });
+    expect(stored?.sandbox).toBe(sandbox);
+  }
 });
 
 test("sessions.create reset-in-place preserves the node creation stamp", async () => {

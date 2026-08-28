@@ -72,6 +72,8 @@ export type TurnAdoptionLifecycle = {
   onAdopted: () => void | Promise<void>;
   /** Return false to reject followup enqueue. */
   onDeferred?: () => boolean | void;
+  /** Reports that a deferred turn is still queued behind an active turn. */
+  onDeferredHeartbeat?: () => void;
   /** Deferred turn finished without owning the reply lane. */
   onAbandoned?: () => void;
   /** Always fires when the followup ownership cycle ends (admitted or not). Gateway cleanup. */
@@ -130,6 +132,8 @@ export type GetReplyOptions = {
     runId: string,
     executionIdentityToken?: ExecutionIdentityAdmissionToken,
   ) => void;
+  /** Reports the terminal agent-run classification to the shared dispatch owner. */
+  onAgentRunTerminalOutcome?: (outcome: "completed" | "failed") => void;
   /**
    * Canonical adoption lifecycle (adopted / deferred / abandoned / settled + pre-adoption abort).
    */

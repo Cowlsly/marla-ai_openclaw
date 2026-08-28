@@ -1,5 +1,10 @@
+import { readSessionMessageIdentity } from "@openclaw/gateway-client/browser";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { SessionObserverDigest } from "../../../../packages/gateway-protocol/src/schema/sessions.js";
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+} from "../../../../src/chat/tool-content.js";
 import type { GatewayEventFrame } from "../../api/gateway.ts";
 import { fireFirstReplyConfetti } from "../../components/confetti.ts";
 import { isGitHubPullRequestLink } from "../../components/github-link-target.ts";
@@ -19,6 +24,7 @@ import {
   resolveUiSelectedGlobalAgentId,
 } from "../../lib/sessions/session-key.ts";
 import { handleChatGatewayEvent, type ChatEventPayload } from "./chat-gateway.ts";
+import { sleep } from "./chat-history-retry.ts";
 import {
   chatScopedEventSessionMatches,
   isHiddenAssistantStreamText,
@@ -39,6 +45,8 @@ import { refreshCurrentChatSessionList } from "./chat-session.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import { requestChatPageUpdate } from "./chat-state-render.ts";
 import { resolveChatAgentId, selectedChatSessionRow } from "./chat-state-route.ts";
+import { transcriptRunId } from "./chat-thread-run-identity.ts";
+import { safeNormalizeMessage } from "./chat-turn-boundary.ts";
 import { handleBackgroundTasksEvent } from "./components/chat-background-tasks.ts";
 import {
   refreshSessionWorkspace,
@@ -49,7 +57,11 @@ import {
   storedChatOutboxScopeKey,
   type StoredChatOutboxScope,
 } from "./composer-persistence.ts";
-import { readChatSessionProjectionScope, reduceChatSessionProjection } from "./history-merge.ts";
+import {
+  getChatSessionProjection,
+  readChatSessionProjectionScope,
+  reduceChatSessionProjection,
+} from "./history-merge.ts";
 import {
   reconcileChatRunFromCurrentSessionRow,
   reconcileChatRunFromSessionRow,
@@ -61,6 +73,7 @@ import { rememberAuthoritativeTerminal } from "./terminal-message-identity.ts";
 import { handleAgentEvent, handleSessionOperationEvent } from "./tool-stream.ts";
 
 const BRANCH_TOPOLOGY_REASONS = new Set(["rewind", "branch-switch", "fork", "reset", "new"]);
+const MISSING_TERMINAL_HISTORY_RETRY_DELAYS_MS = [100, 400, 1_500, 3_000] as const;
 type ChatPanePresentation = () => boolean;
 
 function sessionMessageMatchesChat(
@@ -196,7 +209,8 @@ function replayPendingSessionMessageReload(
   state: ChatPageHost,
   payload: ChatEventPayload | undefined,
   presentation: ChatPanePresentation,
-) {
+  supersedeInFlight = false,
+): boolean {
   const pendingSessionKey = state.pendingSessionMessageReloadSessionKey;
   const payloadSessionKey = payload?.sessionKey?.trim();
   if (
@@ -206,12 +220,105 @@ function replayPendingSessionMessageReload(
     !areUiSessionKeysEquivalent(payloadSessionKey, state.sessionKey) ||
     state.chatRunId
   ) {
-    return;
+    return false;
   }
   state.pendingSessionMessageReloadSessionKey = null;
-  void loadChatHistory(state, { deferBranches: !presentation() }).finally(() =>
-    state.requestUpdate?.(),
+  void loadChatHistory(state, {
+    deferBranches: !presentation(),
+    supersedeInFlight,
+  }).finally(() => state.requestUpdate?.());
+  return true;
+}
+
+function hasRecoveredTerminalReply(state: ChatPageHost, runId: string): boolean {
+  const scope = readChatSessionProjectionScope(state);
+  const projection = getChatSessionProjection(state, state.chatMessages, scope);
+  const message =
+    projection.runs[runId]?.message ??
+    projection.messages.findLast(
+      (candidate) =>
+        readSessionMessageIdentity(candidate)?.role === "assistant" &&
+        transcriptRunId(candidate) === runId,
+    );
+  const text = extractText(message);
+  if (
+    typeof text === "string" &&
+    text.trim().length > 0 &&
+    !isHiddenAssistantStreamText(text) &&
+    !shouldHideAssistantChatMessage(message)
+  ) {
+    return true;
+  }
+  if (shouldHideAssistantChatMessage(message)) {
+    return false;
+  }
+  return (safeNormalizeMessage(message)?.content ?? []).some((block) => {
+    const type = block.type;
+    return type !== "text" && !isToolCallContentType(type) && !isToolResultContentType(type);
+  });
+}
+
+type TerminalRecoveryOwnership = {
+  sessionKey: string;
+  agentId: string;
+  runId: string;
+  client: ChatPageHost["client"];
+  connectionEpoch: number;
+  runLifecycleGeneration: number;
+};
+
+function terminalRecoveryStillOwned(
+  state: ChatPageHost,
+  ownership: TerminalRecoveryOwnership,
+): boolean {
+  return (
+    state.connected &&
+    state.client === ownership.client &&
+    state.connectionEpoch === ownership.connectionEpoch &&
+    areUiSessionKeysEquivalent(state.sessionKey, ownership.sessionKey) &&
+    resolveChatAgentId(state) === ownership.agentId &&
+    (state.chatRunId === null || state.chatRunId === ownership.runId) &&
+    (state.chatRunLifecycleGeneration ?? 0) === ownership.runLifecycleGeneration &&
+    !hasRecoveredTerminalReply(state, ownership.runId)
   );
+}
+
+async function recoverMissingTerminalReply(
+  state: ChatPageHost,
+  payload: ChatEventPayload,
+  presentation: ChatPanePresentation,
+): Promise<void> {
+  const sessionKey = payload.sessionKey;
+  const runId = payload.runId;
+  if (!runId) {
+    return;
+  }
+  const ownership: TerminalRecoveryOwnership = {
+    sessionKey,
+    agentId: resolveChatAgentId(state),
+    runId,
+    client: state.client,
+    connectionEpoch: state.connectionEpoch,
+    runLifecycleGeneration: state.chatRunLifecycleGeneration ?? 0,
+  };
+  for (let attempt = 0; ; attempt += 1) {
+    if (!terminalRecoveryStillOwned(state, ownership)) {
+      return;
+    }
+    await loadChatHistory(state, {
+      deferBranches: !presentation(),
+      supersedeInFlight: true,
+    });
+    state.requestUpdate?.();
+    if (!terminalRecoveryStillOwned(state, ownership)) {
+      return;
+    }
+    const delayMs = MISSING_TERMINAL_HISTORY_RETRY_DELAYS_MS[attempt];
+    if (delayMs === undefined) {
+      return;
+    }
+    await sleep(delayMs);
+  }
 }
 
 function handleSessionsChangedEvent(
@@ -431,6 +538,19 @@ export function handlePageGatewayEvent(
     const sessionMatches = Boolean(
       payload && chatScopedEventSessionMatches(state, payload.sessionKey, payload.agentId),
     );
+    const recoveryRunId =
+      payload?.state === "final" &&
+      (payload.message === undefined || payload.message === null) &&
+      sessionMatches &&
+      typeof payload.runId === "string" &&
+      (!state.chatRunId || state.chatRunId === payload.runId)
+        ? payload.runId
+        : null;
+    const recoveryScope = recoveryRunId ? readChatSessionProjectionScope(state) : null;
+    const projectedRunBeforeEvent =
+      recoveryRunId && recoveryScope
+        ? getChatSessionProjection(state, state.chatMessages, recoveryScope).runs[recoveryRunId]
+        : undefined;
     if (
       payload?.state === "delta" &&
       typeof payload.runId === "string" &&
@@ -482,7 +602,23 @@ export function handlePageGatewayEvent(
     if (shouldRefreshPullRequests) {
       void state.refreshSessionPullRequests?.({ refresh: true });
     }
-    replayPendingSessionMessageReload(state, payload, isPresented);
+    const shouldRecoverMissingTerminal = Boolean(
+      recoveryRunId &&
+      recoveryScope &&
+      (projectedRunBeforeEvent === undefined || projectedRunBeforeEvent.status === "streaming") &&
+      getChatSessionProjection(state, state.chatMessages, recoveryScope).runs[recoveryRunId]
+        ?.status === "completed",
+    );
+    if (shouldRecoverMissingTerminal && payload) {
+      state.pendingSessionMessageReloadSessionKey = null;
+      // Only the first owned completion can recover history. Replayed, yielded,
+      // or background-run terminals must not repeat I/O or disturb the foreground pane.
+      // Persistence can trail the terminal event, so retry bounded authoritative
+      // snapshots until the completed run's reply becomes visible.
+      void recoverMissingTerminalReply(state, payload, isPresented).catch(() => undefined);
+    } else {
+      replayPendingSessionMessageReload(state, payload, isPresented);
+    }
     if (terminalPayload) {
       if (outboxScope) {
         removeDeliveredQueuedChatSendForRun(state, terminalPayload.runId, outboxScope);

@@ -29,6 +29,10 @@ openclaw connect <join-url> --service --session-host
 
 The device holds an outbound connection to the Gateway, advertises worker slots (one per CPU core by default, tunable with `nodeHost.workerRuns.capacity`), and can optionally run each hosted session in a Docker-compatible container (`nodeHost.workerRuns.isolation: "container"`). A device that goes offline keeps its active placement — the session waits for it to reconnect rather than losing work.
 
+The node host reconnects after transient transport loss. A worker child has a bounded 120-second admission window. If that window expires **before the turn starts**, the Gateway can launch another child, up to five attempts total (about ten minutes plus backoff), within the original turn timeout. Launch retries use exponential backoff with jitter; each attempt keeps its own terminal result and reason in the node launch journal. Credential and build rejections are terminal, and work that already started is never replayed by this policy.
+
+If a journal-terminal worker has released its turn claim but teardown stalls, stuck-session recovery records the turn failure after a 30-second cleanup grace, on the next diagnostic cycle. Live workers and turns that still hold their claims are unaffected. On Gateway restart, orphan workspace cleanup for failed placements runs in the background after readiness; ownership fencing and pending workspace-result recovery still run before readiness.
+
 See [Nodes](/nodes) for pairing, capacity, isolation, and offline behavior, and [Connect](/cli/connect) for the CLI.
 
 ## Cloud workers: rented machines through Crabbox
@@ -39,7 +43,7 @@ See [Cloud Workers](/gateway/cloud-workers) for profiles, requirements, dispatch
 
 ## Automatic load balancing across devices
 
-You do not have to pick a device. Choosing **Any available node** in the Place picker — or dispatching with `autoDevice: true` — selects a paired session host automatically and retries up to three ranked hosts if provisioning fails before a machine is allocated. OpenClaw `worker-turn` placements rank hosts by most free worker slots, breaking ties by device ID; Codex `remote-exec` placements do not consume worker slots, so eligible hosts are ranked by device ID alone. When no host qualifies, the error says exactly why: no session hosts paired, all disconnected, or all at capacity.
+You do not have to pick a device. Choosing **Auto** (least-busy device) in the Place picker — or dispatching with `autoDevice: true` — selects a paired session host automatically and retries up to three ranked hosts if provisioning fails before a machine is allocated. OpenClaw `worker-turn` placements rank hosts by most free worker slots, breaking ties by device ID; Codex `remote-exec` placements do not consume worker slots, so eligible hosts are ranked by device ID alone. When no host qualifies, the error says exactly why: no session hosts paired, all disconnected, or all at capacity.
 
 See [Nodes](/nodes#host-openclaw-sessions) for the selection rules and [Control UI](/web/control-ui) for the picker.
 
@@ -48,7 +52,9 @@ See [Nodes](/nodes#host-openclaw-sessions) for the selection rules and [Control 
 Two profile settings turn cloud workers from always-on machines into compute that sleeps when idle:
 
 - `suspendAfter: "2h"` — after the session has been idle for the duration, the Gateway performs the same safe stop as **Stop cloud worker…**: it reconciles the workspace first, then releases the machine. While suspended, you pay for retained snapshot storage only. The next message provisions a replacement automatically — no button to press.
-- `settings.warmImage: true` — capture a scrubbed machine image when a worker stops, and start later workers for the same profile from that image instead of provisioning cold. Paired with `suspendAfter`, a suspended session wakes on a warm machine in a fraction of the cold provisioning time.
+- `settings.warmImage` — capture a scrubbed machine image when a worker stops, and start later workers for the same profile from that image instead of provisioning cold. On by default, so a suspended session wakes on a warm machine in a fraction of the cold provisioning time. Profiles that forward host environment into setup (`setupEnv`) capture only when you opt in explicitly, and `settings.warmImage: false` keeps any profile cold.
+
+With warm images enabled, repeat sessions for the same repository can also avoid a fresh clone. For clean workspaces eligible for the published-origin path, node-tunnel sync copies the machine's per-repository Git seed, fetches only the Git delta, and checks out the requested commit. Other workspaces keep the normal sync path.
 
 Suspension never interrupts work: sessions with an active turn, queued messages, or unreconciled results are skipped and re-checked on the next sweep. See the profile fields in [Cloud Workers](/gateway/cloud-workers#configuration) for costs, capture boundaries, and prerequisites.
 

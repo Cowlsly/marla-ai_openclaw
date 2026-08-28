@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { requireActivePluginRegistry } from "../plugins/runtime.js";
+import { getPluginRuntimeLoadContext } from "../plugins/runtime/load-context.js";
 import { getPreparedModelRuntimeAuthStore } from "./prepared-model-runtime-auth.js";
 import { startSerializedSnapshotBuild } from "./prepared-model-runtime.build.js";
 import { prepareWorkspacePluginRegistries } from "./prepared-model-runtime.inbound-registry.js";
@@ -23,7 +24,6 @@ import {
   rejectPendingPreparedModelRuntimeReplacement,
   refreshPreparedModelRuntimeSnapshots,
 } from "./prepared-model-runtime.js";
-import { getPreparedPluginRuntimeLoadContext } from "./prepared-model-runtime.plugin-context.js";
 
 const mocks = getPreparedModelRuntimeMocks();
 
@@ -294,7 +294,7 @@ describe("prepared model runtime snapshots", () => {
       env,
     });
 
-    expect(getPreparedPluginRuntimeLoadContext(snapshot.pluginRegistry)).toMatchObject({
+    expect(getPluginRuntimeLoadContext(snapshot.pluginRegistry)).toMatchObject({
       rawConfig: config,
       env,
     });
@@ -343,11 +343,15 @@ describe("prepared model runtime snapshots", () => {
           {
             id: "selected",
             model: { primary: "anthropic/claude-sonnet-5" },
+            models: {
+              "anthropic/claude-sonnet-5": { agentRuntime: { id: "selected-runtime" } },
+            },
             modelPolicy: { allow: ["vllm/*"] },
           },
           {
             id: "sibling",
             model: { primary: "ollama/sibling" },
+            models: { "ollama/sibling": { agentRuntime: { id: "sibling-runtime" } } },
             modelPolicy: { allow: ["sibling-only/*"] },
           },
         ],
@@ -359,6 +363,7 @@ describe("prepared model runtime snapshots", () => {
         },
       },
     } as OpenClawConfig;
+    mocks.runtimeSyntheticAuthProviderRefs = ["selected-runtime", "sibling-runtime"];
 
     await publishPreparedModelRuntimeSnapshot({
       agentId: "selected",
@@ -370,8 +375,11 @@ describe("prepared model runtime snapshots", () => {
       config,
       "/tmp/prepared-model-runtime-selected-provider-scope",
       expect.objectContaining({
-        providerDiscoveryProviderIds: ["anthropic", "custom", "openai", "vllm"],
+        providerDiscoveryProviderIds: ["anthropic", "custom", "openai", "selected-runtime", "vllm"],
       }),
+    );
+    expect(mocks.resolveAmbientCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ syntheticAuthProviderRefs: ["selected-runtime"] }),
     );
   });
 

@@ -1,7 +1,7 @@
 // Docker Build Helper tests cover docker build helper script behavior.
 import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -84,6 +84,8 @@ const PLUGIN_LIFECYCLE_MATRIX_DOCKER_E2E_PATH = "scripts/e2e/plugin-lifecycle-ma
 const DOCTOR_SWITCH_DOCKER_E2E_PATH = "scripts/e2e/doctor-install-switch-docker.sh";
 const DOCTOR_SWITCH_SCENARIO_PATH = "scripts/e2e/lib/doctor-install-switch/scenario.sh";
 const DOCTOR_SWITCH_BUSCTL_SHIM_PATH = "scripts/e2e/lib/doctor-install-switch/shims/busctl";
+const DOCTOR_SWITCH_SYSTEMD_EXEC_START_PATH =
+  "scripts/e2e/lib/doctor-install-switch/shims/systemd-exec-start.mjs";
 const DOCTOR_SWITCH_LOGINCTL_SHIM_PATH = "scripts/e2e/lib/doctor-install-switch/shims/loginctl";
 const DOCTOR_SWITCH_SYSTEMCTL_SHIM_PATH = "scripts/e2e/lib/doctor-install-switch/shims/systemctl";
 const PACKAGE_COMPAT_PATH = "scripts/e2e/lib/package-compat.mjs";
@@ -101,6 +103,7 @@ const RELEASE_USER_JOURNEY_SCENARIO_PATH = "scripts/e2e/lib/release-user-journey
 const UPGRADE_SURVIVOR_RUN_SCRIPT = "scripts/e2e/lib/upgrade-survivor/run.sh";
 const UPGRADE_SURVIVOR_UPDATE_RESTART_AUTH_PATH =
   "scripts/e2e/lib/upgrade-survivor/update-restart-auth.sh";
+const UPGRADE_SURVIVOR_CONFIG_PARKING_PATH = "scripts/e2e/lib/upgrade-survivor/config-parking.mjs";
 const GATEWAY_NETWORK_DOCKER_E2E_PATH = "scripts/e2e/gateway-network-docker.sh";
 const BROWSER_CDP_SNAPSHOT_DOCKER_E2E_PATH = "scripts/e2e/browser-cdp-snapshot-docker.sh";
 const SANDBOX_BROWSER_SIDECAR_DOCKER_E2E_PATH = "scripts/e2e/sandbox-browser-sidecar-docker.sh";
@@ -125,10 +128,11 @@ function extractUpgradeSurvivorPayload(script: string) {
   const marker = " bash -lc ";
   const start = script.indexOf(marker);
   const quoted = script.slice(start + marker.length).trimEnd();
-  if (start < 0 || !quoted.startsWith("'") || !quoted.endsWith("'")) {
+  const end = quoted.search(/\n'(?:\n|$)/u);
+  if (start < 0 || !quoted.startsWith("'") || end < 0) {
     throw new Error("upgrade survivor bash -lc payload not found");
   }
-  return quoted.slice(1, -1).replaceAll(`'"'"'`, "'");
+  return quoted.slice(1, end + 1).replaceAll(`'"'"'`, "'");
 }
 
 // Prompt-driving scripts must consume public prompts in the order the CLI renders them.
@@ -249,6 +253,26 @@ function isProcessRunning(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function stopUpgradeSurvivorSupervisor(supervisor: ChildProcess, pidPath: string) {
+  try {
+    if (supervisor.exitCode === null && supervisor.signalCode === null) {
+      supervisor.kill("SIGTERM");
+      await waitForProcessExit(supervisor).catch(() => undefined);
+    }
+  } finally {
+    // Read the owned fixture's publication during cleanup even if readiness failed
+    // before the test learned the descendant PID.
+    if (existsSync(pidPath)) {
+      const pid = Number(readFileSync(pidPath, "utf8").trim());
+      if (Number.isSafeInteger(pid) && pid > 1 && isProcessRunning(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+    }
   }
 }
 
@@ -1408,7 +1432,7 @@ stderr="$(<"$TMPDIR/stderr")"
 node() {
   local script="$1"
   shift
-  if [[ "$script" != "$ROOT_DIR/scripts/package-openclaw-for-docker.mjs" ]]; then
+  if [[ "$script" != "$DOCKER_E2E_PACKAGE_LIB_DIR/../package-openclaw-for-docker.mjs" ]]; then
     command node "$script" "$@"
     return
   fi
@@ -1551,7 +1575,7 @@ export PATH="$TMPDIR/bin:$PATH"
 node() {
   local script="$1"
   shift
-  if [[ "$script" != "$ROOT_DIR/scripts/package-openclaw-for-docker.mjs" ]]; then
+  if [[ "$script" != "$DOCKER_E2E_PACKAGE_LIB_DIR/../package-openclaw-for-docker.mjs" ]]; then
     command node "$script" "$@"
     return
   fi
@@ -2510,7 +2534,9 @@ docker_e2e_docker_run_cmd run demo
     }
     expectTextToIncludeAll(registryHelper, [
       "OPENCLAW_NPM_REGISTRY_UPSTREAM=https://registry.npmjs.org",
-      'OPENCLAW_NPM_REGISTRY_DIST_TAGS="latest=0.0.0,beta=$candidate_version"',
+      '[[ "$candidate_version" =~ -(alpha|beta)\\.[1-9][0-9]*$ ]]',
+      'dist_tags="latest=0.0.0,$dist_tags"',
+      'OPENCLAW_NPM_REGISTRY_DIST_TAGS="$dist_tags"',
       'export NPM_CONFIG_REGISTRY="http://127.0.0.1:$(cat "$port_file")"',
       'export npm_config_registry="$NPM_CONFIG_REGISTRY"',
     ]);
@@ -2523,9 +2549,13 @@ docker_e2e_docker_run_cmd run demo
     const publishedRunner = readFileSync(UPGRADE_SURVIVOR_RUN_SCRIPT, "utf8");
     const updateRestartAuth = readFileSync(UPGRADE_SURVIVOR_UPDATE_RESTART_AUTH_PATH, "utf8");
 
-    expect(runner.indexOf("\nconfigure_plugin_registry\n")).toBeLessThan(
-      runner.indexOf('\necho "Running package update against the mounted tarball..."\n'),
+    const runnerPluginRegistryIndex = runner.indexOf("\nconfigure_plugin_registry\n");
+    const runnerCompanionInstallIndex = runner.indexOf("\ninstall_companion_plugins\n");
+    const runnerUpdateIndex = runner.indexOf(
+      '\necho "Running package update against the mounted tarball..."\n',
     );
+    expect(runnerPluginRegistryIndex).toBeLessThan(runnerCompanionInstallIndex);
+    expect(runnerCompanionInstallIndex).toBeLessThan(runnerUpdateIndex);
     expect(
       publishedRunner.indexOf("phase configure-plugin-registry configure_plugin_registry"),
     ).toBeLessThan(publishedRunner.indexOf("phase update-candidate update_candidate"));
@@ -2533,13 +2563,11 @@ docker_e2e_docker_run_cmd run demo
     const runnerPrepareIndex = runner.indexOf(
       'prepare_update_restart_probe_current_install "$PORT" "$GATEWAY_LOG"',
     );
-    const runnerPluginRegistryIndex = runner.indexOf("\nconfigure_plugin_registry\n");
     expect(runnerClawHubIndex).toBeGreaterThan(-1);
-    expect(runnerClawHubIndex).toBeLessThan(runnerPrepareIndex);
-    expect(runnerPrepareIndex).toBeLessThan(runnerPluginRegistryIndex);
-    expect(runnerPluginRegistryIndex).toBeLessThan(
-      runner.indexOf('\necho "Running package update against the mounted tarball..."\n'),
-    );
+    expect(runnerClawHubIndex).toBeLessThan(runnerPluginRegistryIndex);
+    expect(runnerPluginRegistryIndex).toBeLessThan(runnerCompanionInstallIndex);
+    expect(runnerCompanionInstallIndex).toBeLessThan(runnerPrepareIndex);
+    expect(runnerPrepareIndex).toBeLessThan(runnerUpdateIndex);
     const publishedClawHubIndex = publishedRunner.indexOf(
       "phase configure-clawhub-fixture configure_clawhub_fixture",
     );
@@ -2577,24 +2605,55 @@ docker_e2e_docker_run_cmd run demo
     expect(publishedRunner.indexOf("phase assert-prepublish-requests node")).toBeLessThan(
       publishedRunner.indexOf("phase doctor run_doctor"),
     );
-    expect(runner.indexOf('openclaw "${update_args[@]}"')).toBeLessThan(
-      runner.indexOf(
-        'assert-prepublish-requests "$OPENCLAW_CLAWHUB_URL" "@openclaw/whatsapp" "$package_version"',
-      ),
+    const discordInstallIndex = runner.indexOf(
+      'openclaw_e2e_fixture_plugin_command openclaw -- \\\n    plugins install "npm:@openclaw/discord@$package_version" --pin',
     );
+    const whatsappInstallIndex = runner.indexOf(
+      'openclaw_e2e_fixture_plugin_command openclaw -- \\\n      plugins install "clawhub:@openclaw/whatsapp@$package_version"',
+    );
+    const clawhubRequestIndex = runner.indexOf(
+      'assert-prepublish-requests "$OPENCLAW_CLAWHUB_URL" "@openclaw/whatsapp" "$package_version"',
+    );
+    const codexInstallIndex = runner.indexOf(
+      'openclaw_e2e_fixture_plugin_command openclaw -- \\\n      plugins install "npm:@openclaw/codex@$package_version" --pin',
+    );
+    const restoreCompanionIndex = runner.indexOf(
+      'restore "$OPENCLAW_CONFIG_PATH" "$authored_config"',
+    );
+    const assertCompanionIndex = runner.indexOf('assert-companion-installs "$package_version"');
+    expect(discordInstallIndex).toBeGreaterThan(-1);
+    expect(discordInstallIndex).toBeLessThan(whatsappInstallIndex);
+    expect(whatsappInstallIndex).toBeLessThan(clawhubRequestIndex);
+    expect(clawhubRequestIndex).toBeLessThan(codexInstallIndex);
+    expect(codexInstallIndex).toBeLessThan(restoreCompanionIndex);
+    expect(restoreCompanionIndex).toBeLessThan(assertCompanionIndex);
+    expect(assertCompanionIndex).toBeLessThan(runnerPrepareIndex);
     expect(
-      runner.indexOf(
-        'assert-prepublish-requests "$OPENCLAW_CLAWHUB_URL" "@openclaw/whatsapp" "$package_version"',
-      ),
-    ).toBeLessThan(runner.indexOf("openclaw doctor --fix --non-interactive"));
-    expect(runner).toContain(
-      'if [ "${OPENCLAW_UPGRADE_SURVIVOR_SCENARIO:-base}" = "feishu-channel" ]; then',
-    );
+      runner.match(/openclaw_e2e_fixture_plugin_command openclaw -- \\\n\s+plugins install/gu),
+    ).toHaveLength(3);
+    expect(runner).not.toContain("--accept-capabilities");
+    expect(runner).toContain('park-companion-install "$OPENCLAW_CONFIG_PATH" "$authored_config"');
+    expectTextToIncludeAll(runner, [
+      "install_status=$?",
+      "restore_status=$?",
+      'if [ "$install_status" -ne 0 ]; then',
+      'return "$install_status"',
+      'if [ "$restore_status" -ne 0 ]; then',
+      'return "$restore_status"',
+    ]);
+    expect(runner).toContain('if [ "$SCENARIO" = "feishu-channel" ]; then');
     expect(publishedRunner).toContain('if [ "$SCENARIO" = "feishu-channel" ]; then');
     expect(publishedRunner).toContain(
       [
         'if [ "$SCENARIO" = "configured-plugin-installs" ] || [ "$SCENARIO" = "sqlite-volume" ]; then',
         '  export MATRIX_ACCESS_TOKEN="upgrade-survivor-matrix-token"',
+        '  export BRAVE_API_KEY="BSA_upgrade_survivor_brave_key"',
+        "fi",
+      ].join("\n"),
+    );
+    expect(runner).toContain(
+      [
+        'if [ "$SCENARIO" = "configured-plugin-installs" ] || [ "$SCENARIO" = "sqlite-volume" ]; then',
         '  export BRAVE_API_KEY="BSA_upgrade_survivor_brave_key"',
         "fi",
       ].join("\n"),
@@ -2620,12 +2679,11 @@ docker_e2e_docker_run_cmd run demo
     }
     expectTextToIncludeAll(publishedRunner, [
       "park_prepublish_authored_config",
-      "park-prepublish-auth-config",
+      "park-prepublish",
       "assert_prepublish_fixture_idle",
       "assert-no-requests",
       "restore_prepublish_authored_config",
-      "restore-prepublish-auth-config",
-      "cmp -s",
+      "config-parking.mjs",
       "'^(GATEWAY_AUTH_TOKEN_REF|OPENCLAW_CLAWHUB_URL)='",
       "OPENCLAW_CLAWHUB_URL=%s",
     ]);
@@ -2639,15 +2697,22 @@ docker_e2e_docker_run_cmd run demo
       publishedRunner.lastIndexOf("write_update_restart_service_env"),
     );
     for (const script of [runner, updateRestartAuth]) {
-      expect(script).not.toContain("park-prepublish-auth-config");
       expect(script).not.toContain("assert-no-requests");
     }
+    expect(updateRestartAuth).toContain("park-restart-probe");
+    expect(updateRestartAuth).toContain('"$OPENCLAW_CONFIG_PATH"');
     expect(publishedRunner).not.toContain(
       '\nexport MATRIX_ACCESS_TOKEN="upgrade-survivor-matrix-token"\n',
     );
     expect(publishedRunner).not.toContain(
       '\nexport BRAVE_API_KEY="BSA_upgrade_survivor_brave_key"\n',
     );
+    expect(runner).not.toContain('\nexport BRAVE_API_KEY="BSA_upgrade_survivor_brave_key"\n');
+    expect(runner).toContain(
+      'source "$HARNESS_ROOT_DIR/scripts/e2e/lib/prepublish-plugin-registry.sh"',
+    );
+    expect(runner).toContain("openclaw_prepublish_plugin_registry_configure_docker_args");
+    expect(runner).not.toContain("configure_prepublish_plugin_registry()");
     expect(
       runner.match(
         /-v "\$HARNESS_ROOT_DIR\/scripts\/e2e\/lib\/clawhub-fixture-server\.cjs:\/tmp\/openclaw-clawhub-fixture-server\.cjs:ro"/gu,
@@ -2656,6 +2721,16 @@ docker_e2e_docker_run_cmd run demo
     expect(
       runner.match(
         /-e OPENCLAW_UPGRADE_SURVIVOR_CLAWHUB_FIXTURE_SERVER=\/tmp\/openclaw-clawhub-fixture-server\.cjs/gu,
+      ),
+    ).toHaveLength(2);
+    expect(
+      runner.match(
+        /-v "\$HARNESS_ROOT_DIR\/scripts\/e2e\/lib\/upgrade-survivor\/config-parking\.mjs:\/tmp\/openclaw-config-parking\.mjs:ro"/gu,
+      ),
+    ).toHaveLength(2);
+    expect(
+      runner.match(
+        /-e OPENCLAW_UPGRADE_SURVIVOR_CONFIG_PARKING_HELPER=\/tmp\/openclaw-config-parking\.mjs/gu,
       ),
     ).toHaveLength(2);
   });
@@ -2934,7 +3009,9 @@ exec "$@"
     const exitPromise = new Promise<{
       code: number | null;
       signal: NodeJS.Signals | null;
-    }>((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+    }>((resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
 
     try {
       for (let attempt = 0; attempt < 500 && !existsSync(markerPath); attempt += 1) {
@@ -3119,6 +3196,200 @@ fi
     expect(updateRestartAuth).toContain(
       'openclaw_e2e_wait_gateway_ready "$gateway_pid" "$log_file" 360 "$port"',
     );
+  });
+
+  it("scopes candidate device identity doctor markers to the doctor process", () => {
+    const workDir = tempDirs.make("openclaw-upgrade-survivor-doctor-env-");
+    writeExecutables(join(workDir, "bin"), {
+      openclaw: `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$@" >"$CAPTURE_DIR/doctor-argv"
+{
+  printf 'OPENCLAW_UPDATE_IN_PROGRESS=%s\\n' "\${OPENCLAW_UPDATE_IN_PROGRESS-unset}"
+  printf 'OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR=%s\\n' "\${OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR-unset}"
+  printf 'OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE=%s\\n' "\${OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE-unset}"
+} >"$CAPTURE_DIR/doctor-env"
+exit 23
+`,
+    });
+
+    const script = repoShell(workDir)`
+export PATH="$TMPDIR/bin:$PATH"
+export CAPTURE_DIR="$TMPDIR"
+export OPENCLAW_CONFIG_PATH="$TMPDIR/openclaw.json"
+export OPENCLAW_UPGRADE_SURVIVOR_CONFIG_PARKING_HELPER="$ROOT_DIR/${UPGRADE_SURVIVOR_CONFIG_PARKING_PATH}"
+printf '%s\n' '{"gateway":{"mode":"local"}}' >"$OPENCLAW_CONFIG_PATH"
+unset OPENCLAW_UPDATE_IN_PROGRESS
+unset OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR
+unset OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE
+source "$ROOT_DIR/${UPGRADE_SURVIVOR_UPDATE_RESTART_AUTH_PATH}"
+install_update_restart_systemctl_shim() { :; }
+seed_update_restart_probe_device_auth() { :; }
+openclaw_e2e_maybe_timeout() {
+  shift
+  "$@"
+}
+if prepare_update_restart_probe_current_install 18789 "$TMPDIR/gateway.log" >/dev/null 2>&1; then
+  echo "doctor unexpectedly succeeded" >&2
+  exit 3
+fi
+{
+  printf 'OPENCLAW_UPDATE_IN_PROGRESS=%s\\n' "\${OPENCLAW_UPDATE_IN_PROGRESS-unset}"
+  printf 'OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR=%s\\n' "\${OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR-unset}"
+  printf 'OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE=%s\\n' "\${OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE-unset}"
+} >"$CAPTURE_DIR/parent-env"
+`;
+
+    const result = spawnSync("bash", ["-lc", script], { encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(readFileSync(join(workDir, "doctor-argv"), "utf8").trimEnd().split("\n")).toEqual([
+      "doctor",
+      "--fix",
+      "--non-interactive",
+    ]);
+    expect(readFileSync(join(workDir, "doctor-env"), "utf8")).toBe(
+      [
+        "OPENCLAW_UPDATE_IN_PROGRESS=1",
+        "OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR=1",
+        "OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE=1",
+        "",
+      ].join("\n"),
+    );
+    expect(readFileSync(join(workDir, "parent-env"), "utf8")).toBe(
+      [
+        "OPENCLAW_UPDATE_IN_PROGRESS=unset",
+        "OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR=unset",
+        "OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE=unset",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it.each([
+    ["doctor", 41],
+    ["readiness", 42],
+    ["service-env", 43],
+    ["install", 44],
+  ] as const)(
+    "restores the canonical authored config after %s failure",
+    (failureStage, expectedStatus) => {
+      const workDir = tempDirs.make(`openclaw-upgrade-survivor-${failureStage}-failure-`);
+      writeExecutables(join(workDir, "bin"), {
+        openclaw: `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s %s\n' "$OPENCLAW_CONFIG_PATH" "$*" >>"$CAPTURE_DIR/openclaw-calls"
+if [ "$FAILURE_STAGE" = doctor ] && [ "\${1:-}" = doctor ]; then
+  exit 41
+fi
+if [ "\${1:-}" = gateway ] && [ "\${2:-}" = install ]; then
+  [ "$FAILURE_STAGE" != install ] || exit 44
+  exit 0
+fi
+sleep 30
+`,
+      });
+
+      const script = repoShell(workDir)`
+export PATH="$TMPDIR/bin:$PATH"
+export CAPTURE_DIR="$TMPDIR"
+export FAILURE_STAGE="${failureStage}"
+export OPENCLAW_STATE_DIR="$TMPDIR/state"
+export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"
+export OPENCLAW_UPGRADE_SURVIVOR_CONFIG_PARKING_HELPER="$ROOT_DIR/${UPGRADE_SURVIVOR_CONFIG_PARKING_PATH}"
+export OPENCLAW_UPGRADE_SURVIVOR_SYSTEMCTL_SHIM_PID_FILE="$TMPDIR/gateway.pid"
+export OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SERVICE_INSTALL_JSON="$TMPDIR/install.json"
+export OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SERVICE_INSTALL_ERR="$TMPDIR/install.err"
+export GATEWAY_AUTH_TOKEN_REF=upgrade-survivor-token
+mkdir -p "$OPENCLAW_STATE_DIR"
+authored_config='{"channels":{"discord":{"dm":{"policy":"allowlist","allowFrom":["123"]}}}}'
+printf '%s\n' "$authored_config" >"$OPENCLAW_CONFIG_PATH"
+source "$ROOT_DIR/${UPGRADE_SURVIVOR_UPDATE_RESTART_AUTH_PATH}"
+install_update_restart_systemctl_shim() { :; }
+seed_update_restart_probe_device_auth() { :; }
+openclaw_e2e_maybe_timeout() {
+  shift
+  "$@"
+}
+openclaw_e2e_wait_gateway_ready() {
+  [ "$FAILURE_STAGE" != readiness ] || return 42
+}
+write_update_restart_service_auth_env() {
+  [ "$FAILURE_STAGE" != service-env ] || return 43
+}
+status=0
+prepare_update_restart_probe_current_install 18789 "$TMPDIR/gateway.log" >/dev/null 2>&1 || status=$?
+printf '%s\n' "$status" >"$CAPTURE_DIR/status"
+cmp -s "$OPENCLAW_CONFIG_PATH" <(printf '%s\n' "$authored_config")
+[ ! -e "$TMPDIR/gateway.log.authored-config" ]
+if [ -n "\${gateway_pid:-}" ]; then
+  kill "$gateway_pid" >/dev/null 2>&1 || true
+  wait "$gateway_pid" >/dev/null 2>&1 || true
+fi
+`;
+
+      const result = spawnSync("bash", ["-lc", script], { encoding: "utf8" });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(workDir, "status"), "utf8")).toBe(`${expectedStatus}\n`);
+      const calls = readFileSync(join(workDir, "openclaw-calls"), "utf8");
+      expect(calls).toContain(join(workDir, "state", "openclaw.json"));
+      expect(calls).not.toContain("OPENCLAW_CONFIG_PATH=");
+    },
+  );
+
+  it("prefers restore failure and retains the authored config snapshot", () => {
+    const workDir = tempDirs.make("openclaw-upgrade-survivor-restore-failure-");
+    writeExecutables(join(workDir, "bin"), {
+      openclaw: `#!/usr/bin/env bash
+set -euo pipefail
+exit 41
+`,
+      "config-parking-wrapper.mjs": `import { spawnSync } from "node:child_process";
+
+const args = process.argv.slice(2);
+if (args[0] === "restore") {
+  process.exit(57);
+}
+const result = spawnSync(
+  process.execPath,
+  [process.env.REAL_CONFIG_PARKING_HELPER, ...args],
+  { stdio: "inherit", env: process.env },
+);
+process.exit(result.status ?? 1);
+`,
+    });
+
+    const script = repoShell(workDir)`
+export PATH="$TMPDIR/bin:$PATH"
+export OPENCLAW_STATE_DIR="$TMPDIR/state"
+export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"
+export REAL_CONFIG_PARKING_HELPER="$ROOT_DIR/${UPGRADE_SURVIVOR_CONFIG_PARKING_PATH}"
+export OPENCLAW_UPGRADE_SURVIVOR_CONFIG_PARKING_HELPER="$TMPDIR/bin/config-parking-wrapper.mjs"
+mkdir -p "$OPENCLAW_STATE_DIR"
+printf '%s\n' '{"channels":{"discord":{"dm":{"policy":"allowlist"}}}}' >"$OPENCLAW_CONFIG_PATH"
+source "$ROOT_DIR/${UPGRADE_SURVIVOR_UPDATE_RESTART_AUTH_PATH}"
+install_update_restart_systemctl_shim() { :; }
+seed_update_restart_probe_device_auth() { :; }
+openclaw_e2e_maybe_timeout() {
+  shift
+  "$@"
+}
+status=0
+prepare_update_restart_probe_current_install 18789 "$TMPDIR/gateway.log" >/dev/null 2>&1 || status=$?
+printf '%s\n' "$status" >"$TMPDIR/status"
+`;
+
+    const result = spawnSync("bash", ["-lc", script], { encoding: "utf8" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(join(workDir, "status"), "utf8")).toBe("57\n");
+    expect(existsSync(join(workDir, "gateway.log.authored-config"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(workDir, "state", "openclaw.json"), "utf8"))).toEqual({
+      plugins: { enabled: false },
+      gateway: expect.objectContaining({ reload: { mode: "off" } }),
+    });
   });
 
   it("keeps upgrade survivor auto-auth success summary set -u safe", () => {
@@ -3380,13 +3651,15 @@ setInterval(() => {}, 1_000);
           },
           stdio: "ignore",
         });
-        let descendantPid: number | undefined;
         try {
           for (let attempt = 0; attempt < 100 && !existsSync(statePath); attempt += 1) {
             await delay(10);
           }
-          expect(existsSync(statePath)).toBe(true);
-          descendantPid = Number.parseInt(readFileSync(descendantPidPath, "utf8"), 10);
+          expect(
+            existsSync(statePath),
+            `${supervisorPath}: readiness missing (exit=${supervisor.exitCode}, signal=${supervisor.signalCode})`,
+          ).toBe(true);
+          const descendantPid = Number.parseInt(readFileSync(descendantPidPath, "utf8"), 10);
           expect(descendantPid).toBeGreaterThan(1);
           expect(isProcessRunning(descendantPid)).toBe(true);
 
@@ -3398,15 +3671,7 @@ setInterval(() => {}, 1_000);
           }
           expect(isProcessRunning(descendantPid)).toBe(false);
         } finally {
-          if (supervisor.exitCode === null && supervisor.signalCode === null) {
-            supervisor.kill("SIGTERM");
-            await waitForProcessExit(supervisor).catch(() => undefined);
-          }
-          if (descendantPid !== undefined && isProcessRunning(descendantPid)) {
-            try {
-              process.kill(descendantPid, "SIGKILL");
-            } catch {}
-          }
+          await stopUpgradeSurvivorSupervisor(supervisor, descendantPidPath);
         }
       }
     },
@@ -3474,23 +3739,14 @@ if (starts === 1) {
           },
           stdio: "ignore",
         });
-        let descendantPid: number | undefined;
         try {
           expect(await waitForProcessExit(supervisor)).toBe(0);
-          descendantPid = Number.parseInt(readFileSync(descendantPidPath, "utf8"), 10);
+          const descendantPid = Number.parseInt(readFileSync(descendantPidPath, "utf8"), 10);
           expect(descendantPid).toBeGreaterThan(1);
           expect(readFileSync(startsPath, "utf8")).toBe("xx");
           expect(readFileSync(replacementPath, "utf8")).toBe("drained");
         } finally {
-          if (supervisor.exitCode === null && supervisor.signalCode === null) {
-            supervisor.kill("SIGTERM");
-            await waitForProcessExit(supervisor).catch(() => undefined);
-          }
-          if (descendantPid !== undefined && isProcessRunning(descendantPid)) {
-            try {
-              process.kill(descendantPid, "SIGKILL");
-            } catch {}
-          }
+          await stopUpgradeSurvivorSupervisor(supervisor, descendantPidPath);
         }
       }
     },
@@ -3880,13 +4136,13 @@ grep -Fxq preserved "$TMPDIR/caller-fd"
 
     expectTextToIncludeAll(runner, [
       "OPENCLAW_DOCKER_ALL_LANES=codex-on-demand",
-      "OPENCLAW_PREPUBLISH_PLUGIN_REGISTRY_DIR=/tmp/openclaw-prepublish-plugin-registry",
       "source scripts/e2e/lib/prepublish-plugin-registry.sh",
-      "openclaw_prepublish_plugin_registry_start",
-      "OPENCLAW_PREPUBLISH_PLUGIN_REGISTRY_REQUIRED_PACKAGES_JSON='[\"@openclaw/codex\"]'",
+      "openclaw_prepublish_plugin_registry_configure_docker_args",
+      "openclaw_prepublish_plugin_registry_start_mounted",
+      "'[\"@openclaw/codex\"]'",
     ]);
     expectTextToIncludeAll(registryHelper, [
-      'OPENCLAW_NPM_REGISTRY_DIST_TAGS="latest=0.0.0,beta=$candidate_version"',
+      'OPENCLAW_NPM_REGISTRY_DIST_TAGS="$dist_tags"',
       "OPENCLAW_NPM_REGISTRY_UPSTREAM=https://registry.npmjs.org",
     ]);
     expect(runner.indexOf("openclaw_e2e_install_package")).toBeLessThan(
@@ -3894,6 +4150,20 @@ grep -Fxq preserved "$TMPDIR/caller-fd"
     );
     expect(runner.indexOf("\nconfigure_plugin_registry\n")).toBeLessThan(
       runner.indexOf("\nopenclaw onboard --non-interactive"),
+    );
+  });
+
+  it("reuses the candidate registry lifecycle for channel onboarding", () => {
+    const runner = readFileSync(NPM_ONBOARD_CHANNEL_AGENT_DOCKER_E2E_PATH, "utf8");
+
+    expectTextToIncludeAll(runner, [
+      'source "$ROOT_DIR/scripts/e2e/lib/prepublish-plugin-registry.sh"',
+      "openclaw_prepublish_plugin_registry_configure_docker_args",
+      "openclaw_prepublish_plugin_registry_start_mounted",
+      "'[\"@openclaw/codex\"]'",
+    ]);
+    expect(runner.indexOf("openclaw_prepublish_plugin_registry_start_mounted")).toBeLessThan(
+      runner.indexOf("\nopenclaw_e2e_install_package"),
     );
   });
 
@@ -4483,7 +4753,6 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
       'KITCHEN_SINK_CLI_TIMEOUT="${KITCHEN_SINK_CLI_TIMEOUT:-180s}"',
       "run_kitchen_sink_openclaw_logged()",
       "run_kitchen_sink_openclaw_capture()",
-      'openclaw_e2e_maybe_timeout "$KITCHEN_SINK_CLI_TIMEOUT" node "$OPENCLAW_ENTRY" "$@" >"$log_file" 2>&1',
       'local log_file="${KITCHEN_SINK_TMP_DIR}/${safe_label}.log"',
     ]);
 
@@ -4530,17 +4799,69 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
     }
   });
 
+  it("copies the complete bun harness closure into the package-install lane", () => {
+    const packageRunner = readFileSync(DOCKER_PACKAGE_INSTALL_E2E_PATH, "utf8");
+    const listMatch = /for harness_path in \\\n([^;]*); do/u.exec(packageRunner);
+    expect(listMatch, "bun harness copy list").toBeTruthy();
+    const copiedRoots = [...(listMatch?.[1] ?? "").matchAll(/[^\s\\]+/gu)].map((match) => match[0]);
+    expect(copiedRoots.length).toBeGreaterThan(0);
+    for (const root of copiedRoots) {
+      expect(existsSync(root), `${root} missing from repo`).toBe(true);
+    }
+    const isCopied = (file: string) =>
+      copiedRoots.some((root) => file === root || file.startsWith(`${root}/`));
+
+    // Walk every source/import/spawn reachable from the bun smoke entrypoint.
+    // Anything outside the copied roots crashes the bun proof container at
+    // runtime on its /repo mount, the way the #129552 e2e-instance drift did.
+    const pending = ["scripts/e2e/bun-global-install-smoke.sh"];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const file = pending.pop() ?? "";
+      if (visited.has(file)) {
+        continue;
+      }
+      visited.add(file);
+      expect(existsSync(file), `${file} referenced by the bun harness is missing`).toBe(true);
+      const body = readFileSync(file, "utf8");
+      const requirements: string[] = [];
+      for (const match of body.matchAll(/source "\$ROOT_DIR\/([^"]+)"/gu)) {
+        requirements.push(match[1] ?? "");
+      }
+      for (const match of body.matchAll(/source "\$[0-9A-Z_]+_LIB_DIR\/([^"]+)"/gu)) {
+        requirements.push(join(dirname(file), match[1] ?? ""));
+      }
+      for (const match of body.matchAll(/from "(\.\.?\/[^"]+)"/gu)) {
+        requirements.push(join(dirname(file), match[1] ?? ""));
+      }
+      for (const match of body.matchAll(/\bnode (scripts\/[^\s"']+\.(?:mjs|ts))/gu)) {
+        requirements.push(match[1] ?? "");
+      }
+      for (const requirement of requirements) {
+        expect(
+          isCopied(requirement),
+          `${file} needs ${requirement} inside the bun harness copy roots`,
+        ).toBe(true);
+        pending.push(requirement);
+      }
+    }
+    expect(visited.size).toBeGreaterThan(3);
+  });
+
   it("executes each CLI distribution boundary instead of promoting metadata", () => {
     const installerRunner = readFileSync(CLI_INSTALLER_DISTRIBUTION_E2E_PATH, "utf8");
     const packageRunner = readFileSync(DOCKER_PACKAGE_INSTALL_E2E_PATH, "utf8");
     const updateRunner = readFileSync(UPDATE_CHANNEL_SWITCH_DOCKER_E2E_PATH, "utf8");
 
     expectTextToIncludeAll(packageRunner, [
-      "npm install -g --prefix /tmp/openclaw-proof",
+      "--user root",
+      "npm install -g /tmp/openclaw-current.tgz",
+      "runuser -u appuser -- openclaw --version",
+      "runuser -u appuser -- openclaw --help",
       "corepack prepare pnpm@11.22.0 --activate",
       "pnpm add --global --allow-build=openclaw",
       "bun@1.4.0",
-      'test "$(command -v openclaw)" = "/tmp/openclaw-proof/bin/openclaw"',
+      'test "$(command -v openclaw)" = "/usr/local/bin/openclaw"',
       'test "$(command -v openclaw)" = "$PNPM_HOME/openclaw"',
       "OPENCLAW_BUN_GLOBAL_SMOKE_PROOF_PATH",
       'BUN_HARNESS_DIR="$(mktemp -d',
@@ -4584,7 +4905,6 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
       "assert-config-channel beta",
       "assert-installed-version",
       "assert-status-kind package",
-      "openclaw update --channel dev",
       "openclaw update --channel stable",
     ]);
     expect(updateRunner).toContain("openclaw update --channel beta --yes --json --no-restart");
@@ -4691,6 +5011,29 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
       '-v "$harness_root/test/e2e/qa-lab:/app/test/e2e/qa-lab:ro"',
       '-v "$harness_root/test/helpers:/app/test/helpers:ro"',
     ]);
+
+    const script = repoRootShell`
+export DOCKER_E2E_HARNESS_ROOT_DIR=/trusted-harness
+source "$ROOT_DIR/scripts/lib/docker-e2e-package.sh"
+docker_e2e_harness_mount_args
+for ((index = 1; index < \${#DOCKER_E2E_HARNESS_ARGS[@]}; index += 2)); do
+  printf "%s\\n" "\${DOCKER_E2E_HARNESS_ARGS[$index]}"
+done
+`;
+    const mounts = execFileSync("bash", ["-lc", script], { encoding: "utf8" }).trim().split("\n");
+
+    expect(mounts).toEqual([
+      "/trusted-harness/scripts/e2e:/app/scripts/e2e:ro",
+      "/trusted-harness/scripts/lib:/app/scripts/lib:ro",
+      "/trusted-harness/packages/gateway-client/src:/app/packages/gateway-client/src:ro",
+      "/trusted-harness/packages/normalization-core/package.json:/app/packages/normalization-core/package.json:ro",
+      "/trusted-harness/packages/normalization-core/src:/app/packages/normalization-core/src:ro",
+      "/trusted-harness/tsconfig.json:/app/tsconfig.json:ro",
+      "/trusted-harness/test/e2e/qa-lab:/app/test/e2e/qa-lab:ro",
+      "/trusted-harness/test/helpers:/app/test/helpers:ro",
+      "/trusted-harness/scripts/prepublish-plugin-registry-artifact.mjs:/app/scripts/prepublish-plugin-registry-artifact.mjs:ro",
+      "/trusted-harness/scripts/windows-cmd-helpers.mjs:/app/scripts/windows-cmd-helpers.mjs:ro",
+    ]);
   });
 
   it("preserves pnpm lookup paths for scheduled Docker child lanes", () => {
@@ -4700,10 +5043,6 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
     expect(scheduler).toContain("env.npm_execpath ? path.dirname(env.npm_execpath)");
     expect(scheduler).toContain("path.dirname(process.execPath)");
     expect(scheduler).toContain("env.PATH = [...new Set(pathEntries)].join(path.delimiter)");
-    expect(scheduler).toContain(
-      "const pnpmCommand = env.OPENCLAW_DOCKER_ALL_PNPM_COMMAND?.trim();",
-    );
-    expect(scheduler).toContain("lane.command.replace(/(^|\\s)pnpm(?=\\s)/g");
     expect(scheduler).toContain(
       'env.push(["OPENCLAW_DOCKER_ALL_PNPM_COMMAND", baseEnv.OPENCLAW_DOCKER_ALL_PNPM_COMMAND]);',
     );
@@ -4902,6 +5241,7 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
       "cp scripts/e2e/lib/doctor-install-switch/shims/systemctl",
       "cp scripts/e2e/lib/doctor-install-switch/shims/loginctl",
       "cp scripts/e2e/lib/doctor-install-switch/shims/busctl",
+      "cp scripts/e2e/lib/doctor-install-switch/shims/systemd-exec-start.mjs",
       "OPENCLAW_UPDATE_PARENT_ALLOWS_GATEWAY_SERVICE_REPAIR=1",
       "scripts/e2e/lib/package-compat.mjs",
     ]);
@@ -4950,7 +5290,7 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
     expect(unitPath.stdout).toContain("/etc/systemd/system");
   });
 
-  it("reports the installed doctor switch unit through the systemd manager", () => {
+  it("reports the installed doctor switch unit through the systemd manager", async () => {
     const home = tempDirs.make("openclaw-doctor-busctl-shim-");
     const serviceName = "openclaw-gateway.service";
     const unitPath = join(home, ".config", "systemd", "user", serviceName);
@@ -5034,12 +5374,34 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
         "FragmentPath",
         "DropInPaths",
         "NeedDaemonReload",
+        "LoadState",
       ]),
     ).toEqual([
       { type: "s", data: unitPath },
       { type: "as", data: [] },
       { type: "b", data: false },
+      { type: "s", data: "loaded" },
     ]);
+
+    const binDir = join(home, "bin");
+    writeExecutables(binDir, {
+      busctl: readFileSync(DOCTOR_SWITCH_BUSCTL_SHIM_PATH, "utf8"),
+      "systemd-exec-start.mjs": readFileSync(DOCTOR_SWITCH_SYSTEMD_EXEC_START_PATH, "utf8"),
+    });
+    const { readSystemdServiceExecStart } =
+      await import("../../src/daemon/systemd-service-files.js");
+    expect(
+      await readSystemdServiceExecStart(
+        { HOME: home, PATH: `${binDir}:${process.env.PATH}`, OPENCLAW_SYSTEMD_UNIT: serviceName },
+        { requireEffective: true },
+      ),
+    ).toMatchObject({
+      programArguments,
+      workingDirectory: "/opt/openclaw git",
+      sourcePath: unitPath,
+      definitionPaths: [unitPath],
+      environment: { GREETING: "hello world", OPENCLAW_PROFILE: "fixture" },
+    });
 
     const unexpected = spawnSync(
       DOCTOR_SWITCH_BUSCTL_SHIM_PATH,
@@ -5051,6 +5413,78 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
     );
     expect(unexpected.status).toBe(1);
     expect(unexpected.stderr).toContain("unexpected invocation");
+  });
+
+  it("distinguishes a missing named doctor switch unit from failed or unsupported inspection", async () => {
+    const home = tempDirs.make("openclaw-doctor-busctl-absence-");
+    const binDir = join(home, "bin");
+    const serviceName = "openclaw-gateway-fixture.service";
+    const unitPath = join(home, ".config/systemd/user", serviceName);
+    writeExecutables(binDir, {
+      busctl: readFileSync(DOCTOR_SWITCH_BUSCTL_SHIM_PATH, "utf8"),
+      "systemd-exec-start.mjs": readFileSync(DOCTOR_SWITCH_SYSTEMD_EXEC_START_PATH, "utf8"),
+    });
+    const env = {
+      HOME: home,
+      PATH: `${binDir}:${process.env.PATH}`,
+      OPENCLAW_SYSTEMD_UNIT: "openclaw-gateway-fixture",
+    };
+    const { readSystemdServiceExecStart } =
+      await import("../../src/daemon/systemd-service-files.js");
+    expect(await readSystemdServiceExecStart(env, { requireEffective: true })).toBeNull();
+    const loadArgs = [
+      "--user",
+      "--json=short",
+      "call",
+      "org.freedesktop.systemd1",
+      "/org/freedesktop/systemd1",
+      "org.freedesktop.systemd1.Manager",
+      "LoadUnit",
+      "s",
+      serviceName,
+    ];
+    const invoke = (args: string[]) =>
+      spawnSync(join(binDir, "busctl"), args, { env, encoding: "utf8" });
+    const missing = invoke(loadArgs);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr.trim()).toBe(`Call failed: Unit ${serviceName} not found.`);
+    for (const args of [
+      [...loadArgs, "extra"],
+      [...loadArgs.slice(0, -1), "../missing.service"],
+      [...loadArgs.slice(0, -1), "unrelated.service"],
+      ["--user", "--json=short", "list"],
+    ]) {
+      const unsupported = invoke(args);
+      expect(unsupported.status).toBe(1);
+      expect(unsupported.stderr).not.toContain("not found.");
+    }
+    mkdirSync(dirname(unitPath), { recursive: true });
+    writeFileSync(
+      unitPath,
+      "[Service]\nExecStart=/usr/bin/node /opt/profile/openclaw.mjs gateway\nEnvironment=OLD=stale\nEnvironment=\nEnvironment=KEEP=current REMOVE=value\nUnsetEnvironment=KEEP\nUnsetEnvironment=\nUnsetEnvironment=REMOVE\nEnvironmentFile=/missing/required.env\nEnvironmentFile=\n",
+    );
+    const command = await readSystemdServiceExecStart(env, { requireEffective: true });
+    expect(command?.sourcePath).toBe(unitPath);
+    expect(command?.environment).toEqual({ KEEP: "current" });
+    rmSync(unitPath);
+    mkdirSync(unitPath);
+    const unreadable = invoke(loadArgs);
+    expect(unreadable.status).toBe(1);
+    expect(unreadable.stderr).not.toContain("not found.");
+    const staleObject = invoke([
+      "--user",
+      "--json=short",
+      "get-property",
+      "org.freedesktop.systemd1",
+      "/org/freedesktop/systemd1/unit/openclaw_2dgateway_2dfixture_2eservice",
+      "org.freedesktop.systemd1.Unit",
+      "FragmentPath",
+      "DropInPaths",
+      "NeedDaemonReload",
+      "LoadState",
+    ]);
+    expect(staleObject.status).toBe(1);
+    expect(staleObject.stdout).not.toContain('"loaded"');
   });
 
   it("routes doctor install switch commands through the E2E timeout helper", () => {
@@ -5088,8 +5522,16 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
   });
 
   it("uses the account home for upgrade survivor auto-auth state", () => {
-    const runner = readFileSync(UPGRADE_SURVIVOR_RUN_SCRIPT, "utf8");
-    expectTextToIncludeAll(runner, [
+    const publishedRunner = readFileSync(UPGRADE_SURVIVOR_RUN_SCRIPT, "utf8");
+    const wrapper = readFileSync(UPGRADE_SURVIVOR_DOCKER_E2E_PATH, "utf8");
+    const directRunner = extractUpgradeSurvivorPayload(wrapper);
+
+    expectTextToIncludeAll(wrapper, [
+      'OPENCLAW_TEST_STATE_FUNCTION_B64="$(docker_e2e_test_state_function_b64)"',
+      '-e OPENCLAW_TEST_STATE_FUNCTION_B64="$OPENCLAW_TEST_STATE_FUNCTION_B64"',
+    ]);
+    expect(wrapper).not.toContain("OPENCLAW_TEST_STATE_SCRIPT_B64");
+    expectTextToIncludeAll(publishedRunner, [
       'if [ "$UPDATE_RESTART_MODE" = "auto-auth" ]; then',
       'account_home="$(getent passwd "$(id -u)" | cut -d: -f6)"',
       'if [ -z "$account_home" ]; then',
@@ -5100,12 +5542,39 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
       'export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"',
     ]);
 
-    expect(runner.indexOf("unset OPENCLAW_HOME")).toBeLessThan(
-      runner.indexOf('export OPENCLAW_STATE_DIR="$account_home/.openclaw"'),
+    expect(publishedRunner.indexOf("unset OPENCLAW_HOME")).toBeLessThan(
+      publishedRunner.indexOf('export OPENCLAW_STATE_DIR="$account_home/.openclaw"'),
     );
     expect(
-      runner.indexOf('export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"'),
-    ).toBeLessThan(runner.indexOf("node scripts/e2e/lib/upgrade-survivor/assertions.mjs seed"));
+      publishedRunner.indexOf('export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"'),
+    ).toBeLessThan(
+      publishedRunner.indexOf("node scripts/e2e/lib/upgrade-survivor/assertions.mjs seed"),
+    );
+
+    expectTextToIncludeAll(directRunner, [
+      'openclaw_e2e_eval_test_state_from_b64 "${OPENCLAW_TEST_STATE_FUNCTION_B64:?missing OPENCLAW_TEST_STATE_FUNCTION_B64}"',
+      'if [ "$UPDATE_RESTART_MODE" = "auto-auth" ]; then',
+      'account_home="$(getent passwd "$(id -u)" | cut -d: -f6)"',
+      'openclaw_test_state_create "$account_home" upgrade-survivor',
+      'export HOME="$account_home"',
+      'export USERPROFILE="$account_home"',
+      'export OPENCLAW_STATE_DIR="$account_home/.openclaw"',
+      'export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"',
+      "unset OPENCLAW_HOME",
+      "else",
+      "openclaw_test_state_create upgrade-survivor upgrade-survivor",
+    ]);
+    expect(directRunner.indexOf('openclaw_test_state_create "$account_home"')).toBeLessThan(
+      directRunner.indexOf("unset OPENCLAW_HOME"),
+    );
+    expect(directRunner.indexOf("unset OPENCLAW_HOME")).toBeLessThan(
+      directRunner.indexOf("prepare_update_restart_probe_current_install"),
+    );
+    expect(
+      directRunner.indexOf('export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"'),
+    ).toBeLessThan(
+      directRunner.indexOf("node scripts/e2e/lib/upgrade-survivor/assertions.mjs seed"),
+    );
   });
 
   it("bounds doctor install switch command log diagnostics", () => {
@@ -5497,7 +5966,6 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
       'openclaw_e2e_maybe_timeout "$OPENCLAW_PLUGINS_CLI_TIMEOUT" node "$OPENCLAW_ENTRY" "$@" >"$output_file"',
       "plugins_lifecycle_trace_enabled()",
       "print_plugins_stderr_log()",
-      'openclaw_e2e_maybe_timeout "$OPENCLAW_PLUGINS_CLI_TIMEOUT" node "$OPENCLAW_ENTRY" "$@" >"$output_file" 2>"$error_file"',
       "Plugin sweep command timed out after %s: %s",
       "Plugin sweep command failed with status %s: %s",
       "Plugin sweep capture timed out after %s: %s",
@@ -5547,7 +6015,6 @@ source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
     expectTextToIncludeAll(clawhub, [
       'plugins install "$CLAWHUB_PLUGIN_SPEC"',
       'plugins update "$CLAWHUB_PLUGIN_ID"',
-      "run_plugins_openclaw_logged install-clawhub",
       'openclaw_e2e_maybe_timeout "$OPENCLAW_PLUGINS_CLI_TIMEOUT"',
       "clawhub:@openclaw/kitchen-sink",
     ]);

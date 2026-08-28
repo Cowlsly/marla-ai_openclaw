@@ -19,8 +19,9 @@ import { CONTROL_UI_BUILD_INFO, controlUiBuildDiffersFrom } from "../build-info.
 import { t } from "../i18n/index.ts";
 import { bumpCanvasWidgetFrameConnectionGeneration } from "../lib/chat/canvas-widget-frame-generation.ts";
 import { formatUiError, formatUiExternalText } from "../lib/format-error.ts";
-import { setAvatarGatewayOrigin } from "../lib/identity-avatar.ts";
+import { setAvatarGatewayOrigin } from "../lib/identity-avatar-context.ts";
 import { resolveSessionKey } from "../lib/sessions/index.ts";
+import { readSessionDefaults } from "../lib/sessions/session-key.ts";
 import { generateUUID } from "../lib/uuid.ts";
 import { clearStoredChatSnapshots } from "../pages/chat/session-snapshot-invalidation.runtime.ts";
 import type {
@@ -30,7 +31,12 @@ import type {
   ApplicationGatewaySnapshot,
 } from "./context.ts";
 import { resolveControlUiAuthHeader } from "./control-ui-auth.ts";
-import { loadSettings, patchSettings, persistSessionToken } from "./settings.ts";
+import {
+  loadGatewaySessionSelection,
+  loadSettings,
+  patchSettings,
+  persistSessionToken,
+} from "./settings.ts";
 import { scheduleStaleChunkReload } from "./stale-chunk-reload.ts";
 import { readPresenceEntries, resolveSelfPresenceUser } from "./user-profile.ts";
 
@@ -336,10 +342,6 @@ export function createApplicationGateway(
       connectionRevision += 1;
       void clearStoredChatSnapshots();
     }
-    const hasRequestedSessionKey = requestedSessionKey !== undefined;
-    const nextSessionKey = hasRequestedSessionKey
-      ? requestedSessionKey.trim()
-      : snapshot.sessionKey;
     // Only a gateway URL that differs from the current connection counts as an
     // explicit selection. The login gate always resubmits its prefilled URL, so
     // treating any override as a selection would let an ephemeral approval
@@ -347,6 +349,13 @@ export function createApplicationGateway(
     const gatewayUrlChanged =
       connectionOverrides.gatewayUrl !== undefined &&
       connectionOverrides.gatewayUrl !== connection.gatewayUrl;
+    const targetSelection = gatewayUrlChanged
+      ? loadGatewaySessionSelection(nextConnection.gatewayUrl)
+      : null;
+    const hasRequestedSessionKey = requestedSessionKey !== undefined;
+    const nextSessionKey = hasRequestedSessionKey
+      ? requestedSessionKey.trim()
+      : (targetSelection?.sessionKey ?? snapshot.sessionKey);
     // A different Gateway has no established session to keep mounted on failure.
     // Accepted tradeoff: a restart pill armed for the previous gateway may
     // linger across a mid-restart gateway switch until the next hello or the
@@ -374,7 +383,8 @@ export function createApplicationGateway(
               sessionKey: nextSessionKey,
               lastActiveSessionKey: nextSessionKey,
             }
-          : {}),
+          : (targetSelection ?? {})),
+        ...(targetSelection ? { selectedAgentId: targetSelection.selectedAgentId } : {}),
       },
       persistConnectionSettings || gatewayUrlChanged,
     );
@@ -440,7 +450,7 @@ export function createApplicationGateway(
         if (persistConnectionSettings) {
           settings = loadSettings();
         }
-        const sessionDefaults = readSessionDefaults(hello);
+        const sessionDefaults = readSessionDefaults({ hello });
         const sessionKey = resolveSessionKey(snapshot.sessionKey, hello);
         const lastActiveSessionKey = resolveSessionKey(settings.lastActiveSessionKey, hello);
         if (
@@ -669,17 +679,4 @@ function isSameOriginGateway(gatewayUrl: string): boolean {
 function normalizeCanvasPluginSurfaceUrl(value: string | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
-}
-
-export function readSessionDefaults(
-  hello: GatewayHelloOk,
-): { defaultAgentId?: string | null; modelConfigured?: boolean } | undefined {
-  const snapshot = hello.snapshot;
-  if (!snapshot || typeof snapshot !== "object" || !("sessionDefaults" in snapshot)) {
-    return undefined;
-  }
-  const defaults = snapshot.sessionDefaults;
-  return defaults && typeof defaults === "object"
-    ? (defaults as { defaultAgentId?: string | null; modelConfigured?: boolean })
-    : undefined;
 }
