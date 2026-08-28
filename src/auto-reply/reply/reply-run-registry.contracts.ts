@@ -211,7 +211,7 @@ type ReplyOperationResult =
   | { kind: "failed"; code: ReplyOperationFailureCode; cause?: unknown }
   | { kind: "aborted"; code: ReplyOperationAbortCode };
 
-export type PostCompactionOutcome =
+type PostCompactionOutcome =
   | { kind: "succeeded"; count: number }
   | { kind: "later_model_failed"; count: number };
 
