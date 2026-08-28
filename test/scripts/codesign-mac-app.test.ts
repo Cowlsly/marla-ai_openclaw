@@ -9,9 +9,17 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { link } from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  installFakeCodesign,
+  installTransientFakeCodesign,
+  installElevationFakeCodesign,
+  makeSigningFixture,
+  machoFixture,
+} from "../helpers/mac-signing.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -32,171 +40,7 @@ function runCodesign(args: string[], tempRoot: string) {
   });
 }
 
-function installFakeCodesign(binDir: string) {
-  const fakeCodesign = path.join(binDir, "codesign");
-  writeFileSync(
-    fakeCodesign,
-    `#!/usr/bin/env bash
-set -euo pipefail
-
-if [ -n "\${CODESIGN_ARGS_LOG:-}" ]; then
-  printf '%s\\n' "$*" >>"$CODESIGN_ARGS_LOG"
-fi
-
-entitlements=""
-target=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --entitlements)
-      shift
-      entitlements="$1"
-      ;;
-  esac
-  target="$1"
-  shift || true
-done
-
-if [ -z "$target" ]; then
-  echo "missing codesign target" >&2
-  exit 2
-fi
-
-if [ -n "$entitlements" ]; then
-  count_file="$CODESIGN_CAPTURE_DIR/count"
-  count=0
-  if [ -f "$count_file" ]; then
-    count="$(cat "$count_file")"
-  fi
-  count=$((count + 1))
-  printf '%s' "$count" >"$count_file"
-  copy="$CODESIGN_CAPTURE_DIR/entitlements-$count.plist"
-  cp "$entitlements" "$copy"
-  printf 'entitled\\t%s\\t%s\\t%s\\n' "$target" "$entitlements" "$copy" >>"$CODESIGN_LOG"
-else
-  printf 'plain\\t%s\\n' "$target" >>"$CODESIGN_LOG"
-fi
-`,
-  );
-  chmodSync(fakeCodesign, 0o755);
-}
-
-function installTransientFakeCodesign(binDir: string) {
-  const fakeCodesign = path.join(binDir, "codesign");
-  writeFileSync(
-    fakeCodesign,
-    `#!/usr/bin/env bash
-set -euo pipefail
-
-count=0
-if [ -f "$CODESIGN_COUNT_FILE" ]; then
-  count="$(cat "$CODESIGN_COUNT_FILE")"
-fi
-count=$((count + 1))
-printf '%s' "$count" >"$CODESIGN_COUNT_FILE"
-if [ "\${CODESIGN_PERMANENT_FAILURE:-0}" = "1" ]; then
-  echo "signing identity is not available" >&2
-  exit 7
-fi
-if [ "$count" -le "$CODESIGN_TRANSIENT_FAILURES" ]; then
-  echo "A timestamp was expected but was not found" >&2
-  exit 1
-fi
-`,
-  );
-  chmodSync(fakeCodesign, 0o755);
-}
-
-function installElevationFakeCodesign(binDir: string) {
-  const fakeCodesign = path.join(binDir, "codesign");
-  writeFileSync(
-    fakeCodesign,
-    `#!/usr/bin/env bash
-set -euo pipefail
-
-for arg in "$@"; do
-  if [ "$arg" = "-dv" ]; then
-    printf '%s\n' 'TeamIdentifier=FWJYW4S8P8' >&2
-    if [ "\${CODESIGN_FAKE_NO_AUTHORITY:-0}" != "1" ]; then
-      printf '%s\n' 'Authority=Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)' >&2
-    fi
-    if [ "\${CODESIGN_FAKE_SECOND_AUTHORITY:-0}" = "1" ]; then
-      printf '%s\n' 'Authority=Unexpected Secondary Authority' >&2
-    fi
-    for i in $(seq 1 20000); do
-      printf 'Metadata-%s=value\n' "$i" >&2
-    done
-    if [ "\${CODESIGN_FAKE_FAIL_AFTER_METADATA:-0}" = "1" ]; then
-      exit 7
-    fi
-    exit 0
-  fi
-done
-exit 0
-`,
-  );
-  chmodSync(fakeCodesign, 0o755);
-}
-
 describe("codesign-mac-app temp file hygiene", () => {
-  it.runIf(process.platform === "darwin")(
-    "signs nested worker code before the app without disabling library validation",
-    () => {
-      const tempRoot = tempDirs.make("openclaw-codesign-worker-");
-      const app = path.join(tempRoot, "Fake.app");
-      const binDir = path.join(tempRoot, "bin");
-      const captureDir = path.join(tempRoot, "capture");
-      const logPath = path.join(captureDir, "codesign.log");
-      const argsPath = path.join(captureDir, "args.log");
-      const node = path.join(app, "Contents/Resources/node-worker/arm64/bin/node");
-      const addon = path.join(app, "Contents/Resources/node-worker/arm64/lib/addon.node");
-      for (const directory of [binDir, captureDir, path.dirname(node), path.dirname(addon)]) {
-        mkdirSync(directory, { recursive: true });
-      }
-      // Mach-O headers let the real file classifier distinguish executable and
-      // addon code; only codesign is replaced, so no identity or signature is used.
-      for (const [filename, fileType] of [
-        [node, 2],
-        [addon, 6],
-      ] as const) {
-        const header = Buffer.alloc(32);
-        header.writeUInt32LE(0xfeedfacf, 0);
-        header.writeUInt32LE(0x0100000c, 4);
-        header.writeUInt32LE(fileType, 12);
-        writeFileSync(filename, header);
-      }
-      installFakeCodesign(binDir);
-      const result = spawnSync("bash", [scriptPath, app], {
-        encoding: "utf8",
-        env: {
-          HOME: tempRoot,
-          PATH: `${binDir}:/usr/bin:/bin`,
-          TMPDIR: tempRoot,
-          SIGN_IDENTITY: "Developer ID Application: Fixture",
-          SKIP_TEAM_ID_CHECK: "1",
-          CODESIGN_CAPTURE_DIR: captureDir,
-          CODESIGN_LOG: logPath,
-          CODESIGN_ARGS_LOG: argsPath,
-        },
-      });
-      expect(result.status, result.stderr).toBe(0);
-      const lines = readFileSync(logPath, "utf8").trim().split("\n");
-      const nodeLine = lines.find((line) => line.startsWith(`entitled\t${node}\t`));
-      expect(nodeLine).toBeDefined();
-      const entitlements = readFileSync(
-        expectDefined(nodeLine?.split("\t")[3], "Node entitlements"),
-        "utf8",
-      );
-      expect(entitlements).toContain("com.apple.security.cs.allow-jit");
-      expect(entitlements).not.toContain("disable-library-validation");
-      expect(entitlements).not.toContain("automation.apple-events");
-      expect(lines).toContain(`plain\t${addon}`);
-      expect(lines.at(-1)).toMatch(new RegExp(`^entitled\\t${app}\\t`));
-      const args = readFileSync(argsPath, "utf8");
-      expect(args).toContain(`--verify --strict ${node}`);
-      expect(args).toContain(`--verify --strict ${addon}`);
-    },
-  );
-
   it("does not generate unused entitlement plist files", () => {
     const script = readFileSync(scriptPath, "utf8");
 
@@ -467,10 +311,10 @@ describe("codesign-mac-app temp file hygiene", () => {
       },
     });
 
-    expect(result.status).toBe(1);
+    expect(result.status).toBe(7);
     expect(result.signal).toBeNull();
     expect(result.stdout).not.toContain(`Codesign complete for ${app}`);
-    expect(result.stderr).toContain("got 'not set'");
+    expect(result.stderr).toContain("Could not read codesign metadata");
   });
 
   it("retries only transient Apple timestamp failures", () => {
@@ -616,4 +460,255 @@ printf '%s\\n' \\
       expect(args.split(" ")).toContain(expectedFlag);
     }
   });
+});
+
+describe.runIf(process.platform === "darwin")("Mac native inventory", () => {
+  const workerPath = "Contents/Resources/node-worker/arm64/";
+
+  it.each([false, true])(
+    "uses authoritative classification for all eight magics (elevation: %s)",
+    (elevation) => {
+      const fixture = makeSigningFixture(tempDirs.make("openclaw-inventory-formats-"));
+      const expected = new Map<string, boolean>();
+      const candidates: string[] = [];
+      for (const bits of [32, 64]) {
+        for (const little of [false, true]) {
+          for (const fat of [false, true]) {
+            for (const type of [2, 6]) {
+              const filename = fixture.put(
+                `${workerPath}-${bits}-${little}-${fat}-${type} executable\n\t'\\`,
+                machoFixture(bits, little, fat, type),
+              );
+              candidates.push(filename);
+              const classification = spawnSync("/usr/bin/file", ["-E", "-b", "--", filename], {
+                encoding: "utf8",
+              });
+              expect(classification.status).toBe(0);
+              if (classification.stdout.startsWith("Mach-O")) {
+                expected.set(filename, type === 2);
+              }
+            }
+          }
+        }
+      }
+      for (const [name, bytes] of [
+        ["Mach-O executable.txt", Buffer.from("not native code")],
+        ["Java.class", Buffer.from("cafebabe0000003d0001", "hex")],
+        ["truncated", Buffer.from("cffa", "hex")],
+        ["fat-false-positive", Buffer.from("cafebabe", "hex")],
+      ] as const) {
+        fixture.put(workerPath + name, bytes);
+      }
+      symlinkSync(
+        expectDefined(candidates[0], "native fixture"),
+        path.join(fixture.worker, "native-link"),
+      );
+      symlinkSync("missing", path.join(fixture.worker, "dangling"));
+      const result = fixture.run({}, elevation);
+      expect(result.status, result.stderr).toBe(0);
+      const events = fixture.events();
+      const signed = events.filter(
+        ({ args }) => args.includes("--sign") && args.at(-1) !== fixture.app,
+      );
+      expect(signed).toHaveLength(expected.size);
+      expect(new Set(signed.map(({ args }) => args.at(-1)))).toEqual(new Set(expected.keys()));
+      for (const { args, entitlements } of signed) {
+        const target = expectDefined(args.at(-1), "signed path");
+        expect(entitlements.includes("allow-jit"), target).toBe(expected.get(target));
+        expect(entitlements).not.toContain("disable-library-validation");
+        expect(entitlements).not.toContain("automation.apple-events");
+        expect(
+          events.some(
+            ({ args: verify }) =>
+              verify.includes("--verify") &&
+              verify.includes("--strict") &&
+              verify.at(-1) === target,
+          ),
+        ).toBe(true);
+      }
+      for (const { args } of events.filter(
+        ({ args: query }) => query.includes("-dv") || query.includes("-d"),
+      )) {
+        expect(new Set([fixture.app, ...expected.keys()])).toContain(args.at(-1));
+      }
+      const classified = fixture.classifications().flatMap(({ args }) => args);
+      for (const filename of candidates) {
+        expect(classified).toContain(filename);
+      }
+    },
+  );
+
+  it("keeps classification process count bounded at candidate scale and never follows symlinks", async () => {
+    const fixture = makeSigningFixture(tempDirs.make("openclaw-inventory-scale-"));
+    for (let i = 0; i < 24; i++) {
+      fixture.put(`${workerPath}native-${i}`, machoFixture(64, true, false, i % 2 ? 6 : 2));
+    }
+    const dataSource = path.join(path.dirname(fixture.app), "non-code-payload");
+    writeFileSync(dataSource, "export {};\n");
+    for (let start = 24; start < 1_024; start += 256) {
+      const directory = path.join(fixture.worker, "data", String(start));
+      mkdirSync(directory, { recursive: true });
+      await Promise.all(
+        Array.from({ length: Math.min(256, 1_024 - start) }, (_, index) =>
+          link(dataSource, path.join(directory, `${start + index}.js`)),
+        ),
+      );
+    }
+    const outside = path.join(path.dirname(fixture.app), "external");
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, "native"), machoFixture());
+    symlinkSync(outside, path.join(fixture.worker, "directory-link"));
+    symlinkSync(path.join(outside, "native"), path.join(fixture.worker, "file-link"));
+    symlinkSync("missing", path.join(fixture.worker, "dangling"));
+    const result = fixture.scan({ maxFileCalls: 8 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(fixture.classifications().length).toBeLessThanOrEqual(2);
+    const records = result.stdout.split("\0");
+    expect(records.pop()).toBe("");
+    const natives = records.filter((kind, index) => index % 2 === 0 && kind !== "symlink");
+    expect(natives).toHaveLength(24);
+    expect(records.filter((kind, index) => index % 2 === 0 && kind === "symlink")).toHaveLength(3);
+    expect(records).not.toContain(path.join(outside, "native"));
+  });
+
+  it.each(["", "/", "///"])(
+    "rejects a symlink bundle root with suffix %j before signing",
+    (suffix) => {
+      const root = tempDirs.make("openclaw-inventory-root-link-");
+      const fixture = makeSigningFixture(root);
+      fixture.put(workerPath + "node");
+      const alias = path.join(root, "Alias.app");
+      symlinkSync(fixture.app, alias);
+      const result = fixture.run({}, false, alias + suffix);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("must not be a symlink");
+      expect(fixture.events()).toEqual([]);
+    },
+  );
+
+  it.each(["", "/", "///"])(
+    "signs nested code before containers with bundle suffix %j",
+    (suffix) => {
+      const fixture = makeSigningFixture(tempDirs.make("openclaw-inventory-order-"));
+      const helper = fixture.put("Contents/MacOS/openclaw-mlx-tts");
+      const cua = fixture.put("Contents/Resources/cua-driver");
+      const worker = fixture.put(workerPath + "node");
+      const main = fixture.put("Contents/MacOS/OpenClaw");
+      const sparkle = "Contents/Frameworks/Sparkle.framework";
+      for (const member of [
+        "Sparkle",
+        "Autoupdate",
+        "Updater.app/Contents/MacOS/Updater",
+        "XPCServices/Downloader.xpc/Contents/MacOS/Downloader",
+        "XPCServices/Installer.xpc/Contents/MacOS/Installer",
+      ]) {
+        fixture.put(`${sparkle}/Versions/B/${member}`);
+      }
+      const nested = fixture.put(
+        "Contents/Frameworks/Outer.framework/Versions/A/Inner.framework/inner.dylib",
+        machoFixture(64, true, false, 6),
+      );
+      const result = fixture.run({}, false, fixture.app + suffix);
+      expect(result.status, result.stderr).toBe(0);
+      const signs = fixture
+        .events()
+        .filter(({ args }) => args.includes("--sign"))
+        .map(({ args }) => args.at(-1));
+      expect(signs.slice(0, 4)).toEqual([helper, cua, worker, main]);
+      for (const child of signs) {
+        for (const container of signs) {
+          if (child && container && child.startsWith(container + "/")) {
+            expect(signs.lastIndexOf(child), `${child} before ${container}`).toBeLessThan(
+              signs.indexOf(container),
+            );
+          }
+        }
+      }
+      expect(signs).toContain(nested);
+      expect(signs.at(-1)).toBe(fixture.app);
+    },
+  );
+
+  it.each([
+    "mismatch",
+    "metadata",
+    "metadataFailure",
+    "missingTeam",
+    "verifyFailure",
+    "authority",
+    "appleEvents",
+    "entitlementFailure",
+  ])("fails closed on %s at the signing/audit boundary", (failure) => {
+    const fixture = makeSigningFixture(tempDirs.make("openclaw-inventory-gates-"));
+    const native = fixture.put(workerPath + "node");
+    const config =
+      failure === "missingTeam"
+        ? { metadata: "missing" }
+        : {
+            [failure]:
+              failure === "metadata"
+                ? "failure"
+                : failure === "authority"
+                  ? "Wrong Authority"
+                  : native,
+          };
+    const result = fixture.run(
+      config,
+      ["authority", "appleEvents", "entitlementFailure"].includes(failure),
+    );
+    expect(result.status, result.stdout).not.toBe(0);
+    expect(result.stdout).not.toContain("Codesign complete");
+  });
+
+  it.each(["before", "after"])(
+    "does not consume failed or partial inventory %s signing",
+    (phase) => {
+      for (const fault of [
+        "scanner",
+        "walk",
+        "spawn",
+        "classifier",
+        "empty",
+        "partial",
+        "unterminated",
+        "error-record",
+      ]) {
+        const fixture = makeSigningFixture(tempDirs.make("openclaw-inventory-failure-"));
+        const native = fixture.put(workerPath + "node");
+        fixture.put(workerPath + "addon", machoFixture(64, true, false, 6));
+        const result = fixture.run({ fault, phase, partialPath: native });
+        expect(result.status, `${phase}/${fault}: ${result.stdout}`).not.toBe(0);
+        expect(result.stdout).not.toContain("Codesign complete");
+        if (phase === "before") {
+          expect(fixture.events().filter(({ args }) => args.includes("--sign"))).toEqual([]);
+        }
+      }
+    },
+  );
+
+  it.each(["team", "entitlement"])(
+    "audits native files created while signing the app (%s)",
+    (gate) => {
+      const fixture = makeSigningFixture(tempDirs.make("openclaw-inventory-fresh-"));
+      fixture.put(workerPath + "node");
+      const generated = path.join(fixture.worker, "generated-after-sign.node");
+      const result = fixture.run(
+        {
+          generated,
+          generatedHex: machoFixture(64, true, false, 6).toString("hex"),
+          ...(gate === "team" ? { mismatch: generated } : { appleEvents: generated }),
+        },
+        gate === "entitlement",
+      );
+      expect(result.status, result.stdout).not.toBe(0);
+      expect(
+        fixture
+          .events()
+          .some(
+            ({ args }) =>
+              args.at(-1) === generated && args.includes(gate === "team" ? "-dv" : "-d"),
+          ),
+      ).toBe(true);
+    },
+  );
 });

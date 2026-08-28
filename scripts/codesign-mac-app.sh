@@ -70,8 +70,18 @@ if [[ "$#" -gt 0 ]]; then
   exit 1
 fi
 
+# Match scanner paths and expose symlink roots before any validation or signing.
+while [[ "$APP_BUNDLE" == */ && "$APP_BUNDLE" != "/" ]]; do
+  APP_BUNDLE="${APP_BUNDLE%/}"
+done
 if [ ! -d "$APP_BUNDLE" ]; then
   echo "App bundle not found: $APP_BUNDLE" >&2
+  exit 1
+fi
+
+# A non-following inventory cannot audit a symlink used as the bundle root.
+if [[ -L "$APP_BUNDLE" ]]; then
+  echo "ERROR: App bundle must not be a symlink: $APP_BUNDLE" >&2
   exit 1
 fi
 
@@ -195,6 +205,8 @@ trap cleanup EXIT
 ENT_TMP_APP="$ENT_TMP_DIR/app.plist"
 ENT_TMP_NODE="$ENT_TMP_DIR/node.plist"
 CODESIGN_OUTPUT="$ENT_TMP_DIR/codesign-output"
+NATIVE_INVENTORY="$ENT_TMP_DIR/native-inventory"
+INVENTORY_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/mac-native-inventory.py"
 
 options_args=()
 if [[ "$IDENTITY" != "-" ]]; then
@@ -297,6 +309,7 @@ codesign_metadata_value() {
   local target="$1" key="$2" metadata
   metadata="$(codesign -dv --verbose=4 "$target" 2>&1)" || {
     local rc=$?
+    echo "ERROR: Could not read codesign metadata: $target" >&2
     return "$rc"
   }
   awk -F= -v key="$key" '$1 == key && !found { print $2; found = 1 }' <<<"$metadata"
@@ -313,29 +326,20 @@ verify_team_ids() {
   fi
 
   local expected
-  expected="$(team_id_for "$APP_BUNDLE" || true)"
+  expected="$(team_id_for "$APP_BUNDLE")"
   if [[ -z "$expected" ]]; then
-    echo "WARN: TeamIdentifier missing on app bundle; skipping Team ID audit."
-    return 0
+    echo "ERROR: TeamIdentifier missing on app bundle." >&2
+    return 1
   fi
 
-  local mismatches=()
-  while IFS= read -r -d '' f; do
-    if /usr/bin/file "$f" | /usr/bin/grep -q "Mach-O"; then
-      local team
-      team="$(team_id_for "$f" || true)"
-      if [[ -z "$team" ]]; then
-        team="not set"
-      fi
-      if [[ "$expected" == "not set" ]]; then
-        if [[ "$team" != "not set" ]]; then
-          mismatches+=("$f (TeamIdentifier=$team)")
-        fi
-      elif [[ "$team" != "$expected" ]]; then
-        mismatches+=("$f (TeamIdentifier=$team)")
-      fi
+  local mismatches=() kind f team
+  while IFS= read -r -d '' kind && IFS= read -r -d '' f; do
+    [[ "$kind" == "executable" || "$kind" == "library" ]] || continue
+    team="$(team_id_for "$f")"
+    if [[ -z "$team" || "$team" != "$expected" ]]; then
+      mismatches+=("$f (TeamIdentifier=${team:-missing})")
     fi
-  done < <(find "$APP_BUNDLE" -type f -print0)
+  done < "$NATIVE_INVENTORY"
 
   if [[ "${#mismatches[@]}" -gt 0 ]]; then
     echo "ERROR: Team ID mismatch detected (expected: $expected)"
@@ -364,7 +368,7 @@ verify_elevation_signature() {
   assert_no_elevation_cua_driver
 
   local actual_team
-  actual_team="$(team_id_for "$APP_BUNDLE" || true)"
+  actual_team="$(team_id_for "$APP_BUNDLE")"
   if [[ "$actual_team" != "$ELEVATION_TEAM_ID" ]]; then
     echo "ERROR: Elevation host requires TeamIdentifier=$ELEVATION_TEAM_ID, got '${actual_team:-not set}'." >&2
     exit 1
@@ -380,7 +384,7 @@ verify_elevation_signature() {
   assert_no_apple_events_entitlement() {
     local signed_path="$1"
     local entitlements
-    entitlements="$(codesign -d --entitlements :- "$signed_path" 2>/dev/null || true)"
+    entitlements="$(codesign -d --entitlements :- "$signed_path")"
     if /usr/bin/grep -q "com.apple.security.automation.apple-events" <<<"$entitlements"; then
       echo "ERROR: Elevation host code retains Apple Events entitlement: $signed_path" >&2
       exit 1
@@ -388,15 +392,18 @@ verify_elevation_signature() {
   }
 
   assert_no_apple_events_entitlement "$APP_BUNDLE"
-  while IFS= read -r -d '' signed_path; do
-    if /usr/bin/file "$signed_path" | /usr/bin/grep -q "Mach-O"; then
-      assert_no_apple_events_entitlement "$signed_path"
-    fi
-  done < <(find "$APP_BUNDLE" -type f -print0)
+  local kind signed_path
+  while IFS= read -r -d '' kind && IFS= read -r -d '' signed_path; do
+    [[ "$kind" == "executable" || "$kind" == "library" ]] || continue
+    assert_no_apple_events_entitlement "$signed_path"
+  done < "$NATIVE_INVENTORY"
 }
 
-# Sign bundled helper binaries before signing the app bundle.
+# Complete the scan before any signing; process substitution hides scanner failures.
 assert_no_elevation_cua_driver
+/usr/bin/python3 "$INVENTORY_SCRIPT" "$APP_BUNDLE" > "$NATIVE_INVENTORY"
+
+# Sign bundled helper binaries before signing the app bundle.
 MLX_TTS_HELPER="$APP_BUNDLE/Contents/MacOS/openclaw-mlx-tts"
 if [ -f "$MLX_TTS_HELPER" ]; then
   echo "Signing MLX TTS helper"; sign_plain_item "$MLX_TTS_HELPER"
@@ -410,19 +417,16 @@ fi
 # Seal all native payloads before the enclosing app; npm packages can carry
 # standalone executables and addons below arbitrarily nested dependency roots.
 WORKER_ROOT="$APP_BUNDLE/Contents/Resources/node-worker"
-if [[ -d "$WORKER_ROOT" ]]; then
-  while IFS= read -r -d '' worker_file; do
-    worker_kind="$(/usr/bin/file -b "$worker_file")"
-    if [[ "$worker_kind" == *Mach-O* ]]; then
-      if [[ "$worker_kind" == *executable* ]]; then
-        sign_item "$worker_file" "$ENT_TMP_NODE"
-      else
-        sign_plain_item "$worker_file"
-      fi
-      codesign --verify --strict "$worker_file"
-    fi
-  done < <(find "$WORKER_ROOT" -type f -print0)
-fi
+while IFS= read -r -d '' worker_kind && IFS= read -r -d '' worker_file; do
+  [[ "$worker_kind" == "executable" || "$worker_kind" == "library" ]] || continue
+  [[ "$worker_file" == "$WORKER_ROOT/"* ]] || continue
+  if [[ "$worker_kind" == "executable" ]]; then
+    sign_item "$worker_file" "$ENT_TMP_NODE"
+  else
+    sign_plain_item "$worker_file"
+  fi
+  codesign --verify --strict "$worker_file"
+done < "$NATIVE_INVENTORY"
 
 # Sign main binary
 if [ -f "$APP_BUNDLE/Contents/MacOS/OpenClaw" ]; then
@@ -433,11 +437,12 @@ fi
 SPARKLE="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 if [ -d "$SPARKLE" ]; then
   echo "Signing Sparkle framework and helpers"
-  find "$SPARKLE" -type f -print0 | while IFS= read -r -d '' f; do
-    if /usr/bin/file "$f" | /usr/bin/grep -q "Mach-O"; then
+  while IFS= read -r -d '' kind && IFS= read -r -d '' f; do
+    [[ "$kind" == "executable" || "$kind" == "library" ]] || continue
+    if [[ "$f" == "$SPARKLE/"* ]]; then
       sign_plain_item "$f"
     fi
-  done
+  done < "$NATIVE_INVENTORY"
   sign_plain_item "$SPARKLE/Versions/B/Sparkle"
   sign_plain_item "$SPARKLE/Versions/B/Autoupdate"
   sign_plain_item "$SPARKLE/Versions/B/Updater.app/Contents/MacOS/Updater"
@@ -452,14 +457,18 @@ fi
 
 # Sign any other embedded frameworks/dylibs
 if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
-  find "$APP_BUNDLE/Contents/Frameworks" \( -name "*.framework" -o -name "*.dylib" \) ! -path "*Sparkle.framework*" -print0 | while IFS= read -r -d '' f; do
+  find "$APP_BUNDLE/Contents/Frameworks" -depth \( -name "*.framework" -o -name "*.dylib" \) ! -path "*Sparkle.framework*" -print0 > "$ENT_TMP_DIR/frameworks"
+  while IFS= read -r -d '' f; do
     echo "Signing framework: $f"; sign_plain_item "$f"
-  done
+  done < "$ENT_TMP_DIR/frameworks"
 fi
 
 # Finally sign the bundle
 sign_item "$APP_BUNDLE" "$APP_ENTITLEMENTS"
 
+# Signing can create files. Rebuild after the final seal; the two read-only
+# audits share only this completed post-sign inventory, never the pre-sign scan.
+/usr/bin/python3 "$INVENTORY_SCRIPT" "$APP_BUNDLE" > "$NATIVE_INVENTORY"
 verify_team_ids
 verify_elevation_signature
 

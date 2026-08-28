@@ -2,7 +2,6 @@
 import assert from "node:assert/strict";
 // Package proof: relocation, native load dependencies, provenance, and actual
 // JSONL worker readiness. Never admits or opens the operator's live state.
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -15,6 +14,7 @@ import {
   seedMacNodeWorkerProofState,
   readMacNodeWorkerProofRows,
 } from "./lib/mac-node-worker-proof-state.mjs";
+import { auditMacWorkerPortability } from "./lib/mac-worker-portability.mjs";
 import { runManagedCommand, terminateManagedChild } from "./lib/managed-child-process.mts";
 
 const [runtimeArg, expectedInfoPath] = process.argv.slice(2);
@@ -35,83 +35,7 @@ if (fs.realpathSync(process.execPath) !== node) {
   throw new Error("Worker proof must execute the bundled Node for the requested architecture");
 }
 
-const inside = (candidate) => candidate === runtime || candidate.startsWith(`${runtime}/`);
-const systemLibrary = (candidate) =>
-  candidate.startsWith("/usr/lib/") || candidate.startsWith("/System/Library/");
-function expandLoaderPath(value, filename) {
-  return value
-    .replace(/^@loader_path(?=\/|$)/u, path.dirname(filename))
-    .replace(/^@executable_path(?=\/|$)/u, path.dirname(node));
-}
-function loadCommands(filename) {
-  const output = execFileSync("/usr/bin/otool", ["-l", filename], { encoding: "utf8" });
-  return output.split(/Load command \d+\n/u).flatMap((block) => {
-    const command = /^\s*cmd (LC_\w+)$/mu.exec(block)?.[1];
-    // LC_ID_DYLIB is an install ID, not a file the loader will open.
-    if (!command || !/^LC_(?:LOAD.*DYLIB|REEXPORT_DYLIB|RPATH)$/u.test(command)) {
-      return [];
-    }
-    const value = /^\s*(?:name|path) (.+) \(offset \d+\)$/mu.exec(block)?.[1];
-    if (!value) {
-      throw new Error(`Unreadable native load command in ${filename}`);
-    }
-    return [{ command, value }];
-  });
-}
-const nodeRpaths = loadCommands(node).filter(({ command }) => command === "LC_RPATH");
-let nativeFiles = 0;
-function auditDirectory(directory) {
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const filename = path.join(directory, entry.name);
-    if (entry.isSymbolicLink()) {
-      if (!inside(fs.realpathSync(filename))) {
-        throw new Error(`Worker symlink escapes bundle: ${filename}`);
-      }
-    } else if (entry.isDirectory()) {
-      auditDirectory(filename);
-    } else if (entry.isFile()) {
-      // Read just the magic before calling otool; the complete package also
-      // intentionally carries Linux/Windows prebuilds and other Mac slices.
-      const fd = fs.openSync(filename, "r");
-      const magic = Buffer.alloc(4);
-      try {
-        fs.readSync(fd, magic, 0, 4, 0);
-      } finally {
-        fs.closeSync(fd);
-      }
-      if (
-        !["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca"].includes(
-          magic.toString("hex"),
-        )
-      ) {
-        continue;
-      }
-      nativeFiles++;
-      const commands = loadCommands(filename);
-      const rpaths = [...nodeRpaths, ...commands.filter(({ command }) => command === "LC_RPATH")];
-      for (const { command, value } of commands) {
-        const candidates = value.startsWith("@rpath/")
-          ? rpaths.map(({ value: prefix }) =>
-              path.join(expandLoaderPath(prefix, filename), value.slice(7)),
-            )
-          : [expandLoaderPath(value, filename)];
-        if (
-          !candidates.some(
-            (candidate) =>
-              systemLibrary(candidate) ||
-              (path.isAbsolute(candidate) &&
-                inside(path.resolve(candidate)) &&
-                fs.existsSync(candidate) &&
-                inside(fs.realpathSync(candidate))),
-          )
-        ) {
-          throw new Error(`Nonportable ${command} in ${filename}: ${value}`);
-        }
-      }
-    }
-  }
-}
-auditDirectory(runtime);
+const nativeFiles = auditMacWorkerPortability(runtime, node);
 
 const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-worker-proof-")));
 try {

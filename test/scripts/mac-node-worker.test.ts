@@ -137,3 +137,105 @@ esac
     expect(readFileSync(sentinel, "utf8")).toBe("operator-owned");
   });
 });
+
+describe.runIf(process.platform === "darwin")("Mac worker portability inventory", () => {
+  it("audits all eight header magics through real otool regardless of file classification", async () => {
+    const { auditMacWorkerPortability } =
+      await import("../../scripts/lib/mac-worker-portability.mjs");
+    const { machoFixture } = await import("../helpers/mac-signing.js");
+    const root = temps.make("openclaw-portability-native-");
+    const node = path.join(root, "node");
+    writeFileSync(node, machoFixture());
+    for (const bits of [32, 64]) {
+      for (const little of [false, true]) {
+        for (const fat of [false, true]) {
+          const filename = path.join(root, `${bits}-${little}-${fat} addon`);
+          writeFileSync(filename, machoFixture(bits, little, fat, 6));
+        }
+      }
+    }
+    symlinkSync("node", path.join(root, "internal-link"));
+    expect(auditMacWorkerPortability(root, node)).toBe(9);
+  });
+
+  it("propagates otool rejection of Java sharing the fat magic", async () => {
+    const { auditMacWorkerPortability } =
+      await import("../../scripts/lib/mac-worker-portability.mjs");
+    const { machoFixture } = await import("../helpers/mac-signing.js");
+    const root = temps.make("openclaw-portability-java-");
+    const node = path.join(root, "node");
+    writeFileSync(node, machoFixture());
+    writeFileSync(path.join(root, "Java.class"), Buffer.from("cafebabe0000003d0001", "hex"));
+    expect(() => auditMacWorkerPortability(root, node)).toThrow(/otool/);
+  });
+
+  it.each(["file", "directory", "dangling"])(
+    "rejects %s symlinks outside the worker",
+    async (kind) => {
+      const { auditMacWorkerPortability } =
+        await import("../../scripts/lib/mac-worker-portability.mjs");
+      const { machoFixture } = await import("../helpers/mac-signing.js");
+      const parent = temps.make("openclaw-portability-link-");
+      const root = path.join(parent, "runtime");
+      mkdirSync(root);
+      const node = path.join(root, "node");
+      writeFileSync(node, machoFixture());
+      const external = path.join(parent, "external");
+      if (kind === "directory") {
+        mkdirSync(external);
+      }
+      if (kind === "file") {
+        writeFileSync(external, "outside");
+      }
+      symlinkSync(external, path.join(root, "link"));
+      expect(() => auditMacWorkerPortability(root, node)).toThrow(
+        kind === "dangling" ? /ENOENT/ : /symlink escapes/,
+      );
+    },
+  );
+
+  it.each(
+    [
+      "/usr/lib/libSystem.B.dylib",
+      "/opt/homebrew/lib/nonportable.dylib",
+      "/usr/lib/../../opt/homebrew/lib/nonportable.dylib",
+      "/System/Library/../../opt/homebrew/lib/nonportable.dylib",
+      "@loader_path/../../outside.dylib",
+    ].flatMap((library) => ["thin", "fat64"].map((format) => ({ library, format }))),
+  )("audits load dependencies after inventory ($format, $library)", async ({ library, format }) => {
+    const { auditMacWorkerPortability } =
+      await import("../../scripts/lib/mac-worker-portability.mjs");
+    const { machoFixture } = await import("../helpers/mac-signing.js");
+    const root = temps.make("openclaw-portability-load-");
+    const node = path.join(root, "node");
+    writeFileSync(node, machoFixture());
+    const addon = path.join(root, "addon");
+    const header = machoFixture(64, true, false, 6);
+    const name = Buffer.from(library + "\0");
+    const command = Buffer.alloc(Math.ceil((24 + name.length) / 8) * 8);
+    command.writeUInt32LE(0xc, 0); // LC_LOAD_DYLIB
+    command.writeUInt32LE(command.length, 4);
+    command.writeUInt32LE(24, 8);
+    name.copy(command, 24);
+    header.writeUInt32LE(1, 16);
+    header.writeUInt32LE(command.length, 20);
+    const thin = Buffer.concat([header, command]);
+    // On-disk fat headers are big endian; the arm64 slice is little endian.
+    const payload =
+      format === "fat64"
+        ? Buffer.concat([machoFixture(64, false, true, 6).subarray(0, 4096), thin])
+        : thin;
+    if (format === "fat64") {
+      payload.writeBigUInt64BE(BigInt(thin.length), 24);
+    }
+    writeFileSync(addon, payload);
+    const load = spawnSync("/usr/bin/otool", ["-l", addon], { encoding: "utf8" });
+    expect(load.status, load.stderr).toBe(0);
+    expect(load.stdout).toContain(`name ${library} (offset 24)`);
+    if (library === "/usr/lib/libSystem.B.dylib") {
+      expect(auditMacWorkerPortability(root, node)).toBe(2);
+    } else {
+      expect(() => auditMacWorkerPortability(root, node)).toThrow(/Nonportable LC_LOAD_DYLIB/);
+    }
+  });
+});

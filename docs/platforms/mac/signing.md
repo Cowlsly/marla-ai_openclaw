@@ -16,8 +16,10 @@ title: "macOS signing"
 - `SIGN_IDENTITY` also accepts a certificate SHA-1 hash to distinguish certificates with the same common name.
 - `CODESIGN_TIMESTAMP=auto` (default) enables trusted timestamps for Developer ID Application signatures selected by name or certificate hash. Set `on`/`off` to force either way.
 - Stamps Info.plist with `OpenClawBuildTimestamp` (ISO8601 UTC) and `OpenClawGitCommit` (short hash, `unknown` if unavailable) so the About tab can show build, git, and debug/release channel.
-- Runs a Team ID audit after signing and fails if any Mach-O inside the bundle has a different Team ID. Set `SKIP_TEAM_ID_CHECK=1` to bypass.
+- Runs a Team ID audit after signing and fails if metadata cannot be read, a Team ID is missing, or any Mach-O inside the bundle has a different Team ID. Set `SKIP_TEAM_ID_CHECK=1` to bypass.
 - Signs the private worker's Node executables and native addons before sealing the app. Worker executables receive JIT memory entitlements; native libraries retain library validation and must share the app's signing identity. Packaging verifies each requested architecture's native capabilities and worker readiness in temporary state before and after signing.
+
+Signing uses `/usr/bin/python3` to scan file headers and batches candidates through `/usr/bin/file`, which remains authoritative for native-code and executable classification. It does not run the bundled Node to sign itself. A fresh inventory after the app is sealed feeds the Team ID and elevation audits; scanner or classifier failures stop signing. Worker portability checks pass every header candidate to `/usr/bin/otool`, including formats `file` does not recognize, and reject broken or escaping symlinks.
 
 ## Usage
 
