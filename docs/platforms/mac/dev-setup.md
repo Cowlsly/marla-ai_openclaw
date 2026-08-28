@@ -11,7 +11,7 @@ Build and run the OpenClaw macOS application from source.
 
 ## Prerequisites
 
-- **Xcode 26.2+** (Swift 6.2 toolchain), on the latest macOS available in
+- **Xcode 26.4+** (Swift 6.3 toolchain), on the latest macOS available in
   Software Update.
 - **Node.js 24.15+ & pnpm** for the gateway, CLI, and packaging scripts. Node
   22.22.3+ also works.
@@ -90,8 +90,8 @@ runtime for the Gateway itself.
 
 ### Build fails: toolchain or SDK mismatch
 
-The macOS app build expects the latest macOS SDK and the Swift 6.2 toolchain
-(Xcode 26.2+).
+The macOS app build expects the latest macOS SDK and the Swift 6.3 toolchain
+(Xcode 26.4+).
 
 ```bash
 xcodebuild -version
