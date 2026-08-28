@@ -15,7 +15,7 @@ extensions/active-memory/index.ts	6
 extensions/active-memory/query.ts	2
 extensions/active-memory/session.ts	4
 extensions/active-memory/transcript-result.ts	2
-extensions/admin-http-rpc/src/handler.ts	2
+extensions/admin-http-rpc/src/handler.ts	1
 extensions/amazon-bedrock-mantle/discovery.ts	3
 extensions/amazon-bedrock-mantle/mantle-anthropic.runtime.ts	4
 extensions/amazon-bedrock-mantle/register.sync.runtime.ts	2
@@ -744,7 +744,7 @@ extensions/mattermost/src/mattermost/monitor-slash.ts	1
 extensions/mattermost/src/mattermost/monitor-websocket.ts	2
 extensions/mattermost/src/mattermost/monitor.ts	1
 extensions/mattermost/src/mattermost/slash-commands.ts	1
-extensions/mattermost/src/mattermost/slash-state.ts	6
+extensions/mattermost/src/mattermost/slash-state.ts	5
 extensions/mattermost/src/session-route.ts	1
 extensions/mattermost/src/setup-core.ts	2
 extensions/memory-core/index.ts	4
@@ -2809,7 +2809,7 @@ src/daemon/schtasks-process.ts	2
 src/daemon/schtasks-runtime.ts	4
 src/daemon/service.ts	1
 src/daemon/systemd-exec.ts	2
-src/daemon/systemd-install.ts	5
+src/daemon/systemd-install.ts	2
 src/daemon/systemd-lifecycle.ts	2
 src/daemon/systemd-runtime.ts	1
 src/entry.compile-cache.ts	3
@@ -3268,8 +3268,7 @@ src/infra/state-migrations.fs.ts	1
 src/infra/state-migrations.legacy-session-store.ts	3
 src/infra/state-migrations.legacy-sessions.ts	2
 src/infra/state-migrations.mcp-oauth.ts	2
-src/infra/state-migrations.media-persistence-targets.ts	3
-src/infra/state-migrations.media-persistence.ts	2
+src/infra/state-migrations.media-persistence.ts	1
 src/infra/state-migrations.meeting-transcripts-detection.ts	4
 src/infra/state-migrations.meeting-transcripts-files.ts	5
 src/infra/state-migrations.meeting-transcripts-verify.ts	2
@@ -3938,7 +3937,6 @@ ui/src/components/board/board-widget-cell.ts	1
 ui/src/components/board/board-widget-frame.ts	1
 ui/src/components/browser/browser-annotation.ts	1
 ui/src/components/browser/browser-client.ts	1
-ui/src/components/browser/browser-panel-controller-input.ts	1
 ui/src/components/browser/browser-panel-render.ts	4
 ui/src/components/browser/browser-panel.ts	1
 ui/src/components/command-palette.ts	2

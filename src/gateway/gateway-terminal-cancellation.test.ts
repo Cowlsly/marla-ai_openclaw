@@ -325,12 +325,35 @@ describe("Gateway terminal cancellation", () => {
         }
         releaseDelivery();
         await vi.waitFor(() => {
-          expect(instance.logs()).toContain(`embedded run done: runId=${runA} `);
+          const logs = instance.logs();
+          if (abort) {
+            // Cancellation rejects after attempt cleanup, bypassing normal run-done.
+            // The exact session-lane rejection joins that work; an abort ACK does not.
+            const laneError = logs
+              .split("\n")
+              .find((line) => line.includes(`lane task error: lane=session:${sessionKey} `));
+            expect(laneError).toContain('error="Reply operation aborted by user"');
+            expect(logs).toMatch(
+              new RegExp(`run cleanup: runId=${runA} [^\\n]*aborted=true timedOut=false`),
+            );
+          } else {
+            expect(logs).toContain(`embedded run done: runId=${runA} `);
+          }
         }, WAIT);
         const joinedLogs = gateway.logs();
         expect(joinedLogs).not.toContain("[output truncated to last");
         expect(joinedLogs).not.toContain(`abort settle timed out: runId=${runA} `);
         expect(joinedLogs).not.toContain(`abort settle failed: runId=${runA} `);
+        expect(joinedLogs).not.toContain(`transcript teardown budget expired: runId=${runA} `);
+        expect(joinedLogs).not.toContain("lane task rejected after timeout:");
+        expect(joinedLogs).not.toContain("CRITICAL:");
+        if (abort) {
+          // Public terminal projection is diagnostic, not a cleanup-join receipt.
+          const terminal = await client.request("agent.wait", { runId: runA, timeoutMs: 0 });
+          expect(terminal.ok, JSON.stringify(terminal.error)).toBe(true);
+          expect(terminal.payload).toMatchObject({ runId: runA });
+          console.info("terminal-cancellation public outcome", JSON.stringify(terminal.payload));
+        }
         const joinedHistory = await client.request("sessions.get", { key: sessionKey });
         expect(joinedHistory.ok, JSON.stringify(joinedHistory.error)).toBe(true);
         expect(joinedLogs.split(`embedded run agent start: runId=${runA}`).length - 1).toBe(
@@ -373,9 +396,12 @@ describe("Gateway terminal cancellation", () => {
         }, WAIT);
         const settledLogs = gateway.logs();
         expect(settledLogs).not.toContain("[output truncated to last");
+        expect(settledLogs).not.toContain("lane task rejected after timeout:");
+        expect(settledLogs).not.toContain("CRITICAL:");
         for (const runId of [runA, runB]) {
           expect(settledLogs).not.toContain(`abort settle timed out: runId=${runId} `);
           expect(settledLogs).not.toContain(`abort settle failed: runId=${runId} `);
+          expect(settledLogs).not.toContain(`transcript teardown budget expired: runId=${runId} `);
         }
         expect(settledLogs.split(`embedded run agent start: runId=${runA}`).length - 1).toBe(
           abort ? 1 : 2,
@@ -411,7 +437,9 @@ describe("Gateway terminal cancellation", () => {
       const socket = client?.ws;
       const clientClosed =
         socket && socket.readyState !== socket.CLOSED
-          ? new Promise<void>((resolve) => socket.once("close", resolve))
+          ? new Promise<void>((resolve) => {
+              socket.once("close", resolve);
+            })
           : Promise.resolve();
       client?.close();
       try {
