@@ -14,7 +14,7 @@ import {
   resolveDatabasePath,
 } from "./openclaw-state-db-maintenance.js";
 import { ensureOpenClawStatePermissions } from "./openclaw-state-db-permissions.js";
-import { withExistingOpenClawStateDatabaseArtifactPreservingReadOnly } from "./openclaw-state-db-readonly.js";
+import { withExistingOpenClawStateDatabaseReadOnly } from "./openclaw-state-db-readonly.js";
 import { ensureColumn } from "./openclaw-state-db-schema-helpers.js";
 import {
   assertOpenClawStateWriteAllowed,
@@ -156,7 +156,7 @@ export function initializeNativeOpenClawStateConnection(
   initializeCanonicalSchema: (db: DatabaseSync, pathname: string, env: NodeJS.ProcessEnv) => void,
 ): void {
   if (
-    !withExistingOpenClawStateDatabaseArtifactPreservingReadOnly(
+    !withExistingOpenClawStateDatabaseReadOnly(
       ({ db }) => isUninitializedNativeStartupDatabase(db),
       options,
     )

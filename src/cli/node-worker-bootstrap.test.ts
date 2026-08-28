@@ -30,7 +30,10 @@ import {
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import { withExistingOpenClawStateDatabaseArtifactPreservingReadOnly } from "../state/openclaw-state-db-readonly.js";
 import type { DB } from "../state/openclaw-state-db.generated.js";
-import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  initializeNativeOpenClawStateDatabase,
+} from "../state/openclaw-state-db.js";
 import { ensureCliCommandBootstrap } from "./command-bootstrap.js";
 import { resolveCliStartupPolicy } from "./command-startup-policy.js";
 import { testApi as configGuardTestApi } from "./program/config-guard.js";
@@ -250,6 +253,17 @@ describe("private node worker bootstrap", () => {
       const pinned = getRuntimeConfig();
       expect(pinned.nodeHost).toEqual(config.nodeHost);
       expect(pinned.channels?.["fixture-channel"]).toEqual(config.channels["fixture-channel"]);
+      // A cold worker must admit mature state even when snapshot storage is full.
+      closeOpenClawStateDatabaseForTest();
+      const allocateSnapshot = vi.spyOn(fs, "mkdtempSync").mockImplementation(() => {
+        throw Object.assign(new Error("snapshot storage is full"), { code: "ENOSPC" });
+      });
+      try {
+        initializeNativeOpenClawStateDatabase();
+        expect(allocateSnapshot).not.toHaveBeenCalled();
+      } finally {
+        allocateSnapshot.mockRestore();
+      }
       await runStartupMigrations({ log: { info: vi.fn(), warn: vi.fn() } });
       const prepared = await prepareNodeHostRuntime();
       expect(getRuntimeConfig()).toBe(pinned);
