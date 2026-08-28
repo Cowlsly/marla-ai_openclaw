@@ -225,8 +225,9 @@ describe("compactEmbeddedRunForRecovery", () => {
       vi.useFakeTimers();
       try {
         compactRuntimeMocks.compactEmbeddedAgentSessionOnDemand.mockImplementationOnce(
-          () =>
+          (params: { compactionTimeoutReset?: () => void }) =>
             new Promise((resolve) => {
+              setTimeout(() => params.compactionTimeoutReset?.(), 900);
               setTimeout(() => resolve({ ok: true, compacted: false }), 1_100);
             }),
         );

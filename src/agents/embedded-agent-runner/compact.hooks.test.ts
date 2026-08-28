@@ -538,6 +538,21 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
     expect(sessionManualCompactionMock).toHaveBeenCalledOnce();
   });
 
+  it("refreshes the delegated watchdog before post-compaction hooks", async () => {
+    const compactionTimeoutReset = vi.fn();
+    hookRunner.hasHooks.mockImplementation((name?: string) => name === "after_compaction");
+    hookRunner.runAfterCompaction.mockImplementationOnce(async () => {
+      expect(compactionTimeoutReset).toHaveBeenCalledTimes(3);
+    });
+
+    const result = await compactEmbeddedAgentSessionDirect(
+      wrappedCompactionArgs({ compactionTimeoutReset }),
+    );
+
+    expect(result).toMatchObject({ ok: true, compacted: true });
+    expect(hookRunner.runAfterCompaction).toHaveBeenCalledOnce();
+  });
+
   it("fails closed before generic compaction for a model-locked native session", async () => {
     const result = await compactEmbeddedAgentSessionDirect({
       sessionId: "session-1",

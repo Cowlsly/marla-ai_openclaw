@@ -140,9 +140,18 @@ export function compactContextEngineWithSafetyTimeout(
   abortSignal?: AbortSignal,
 ): Promise<CompactResult> {
   if (isRuntimeCompactionDelegate(contextEngine.compact)) {
-    return raceCompactionWithAbortSignal(
-      () => contextEngine.compact(abortSignal ? { ...params, abortSignal } : params),
-      abortSignal,
+    return compactWithSafetyTimeout(
+      (compactionAbortSignal, resetTimeout) =>
+        contextEngine.compact({
+          ...params,
+          ...(compactionAbortSignal ? { abortSignal: compactionAbortSignal } : {}),
+          runtimeContext: {
+            ...params.runtimeContext,
+            compactionTimeoutReset: resetTimeout,
+          },
+        }),
+      timeoutMs,
+      abortSignal ? { abortSignal } : undefined,
     );
   }
   return compactWithSafetyTimeout(

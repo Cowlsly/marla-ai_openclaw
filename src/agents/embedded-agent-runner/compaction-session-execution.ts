@@ -310,8 +310,11 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
               nextCallId: nextDiagnosticModelCallId,
               ownerGeneration: diagnosticOwner.generation,
               // Multi-stage compaction intentionally serializes provider calls. Each new
-              // request is progress, so it gets the configured request-sized safety window.
-              onStarted: () => resetCompactionTimeout?.(),
+              // request is progress, so both native and delegated watchdogs get a fresh window.
+              onStarted: () => {
+                resetCompactionTimeout?.();
+                params.compactionTimeoutReset?.();
+              },
             },
           );
 
@@ -416,6 +419,8 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
           }
 
           const compactStartedAt = Date.now();
+          // Setup completed: give the first provider request a full safety window.
+          params.compactionTimeoutReset?.();
           const serverResult = await attemptServerEndpointCompaction({
             trigger,
             streamFn: session.agent.streamFn,
@@ -436,6 +441,8 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
           let clientResult: Awaited<ReturnType<typeof activeSession.compact>> | undefined;
           if (!serverResult) {
             try {
+              // The client watchdog starts here; refresh the delegated host watchdog with it.
+              params.compactionTimeoutReset?.();
               clientResult = await compactWithSafetyTimeout(
                 (_signal, resetTimeout) => {
                   resetCompactionTimeout = resetTimeout;
@@ -457,6 +464,8 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
               resetCompactionTimeout = undefined;
             }
           }
+          // Compaction succeeded: post-processing gets its own full watchdog window.
+          params.compactionTimeoutReset?.();
           const effectiveFirstKeptEntryId = clientResult?.firstKeptEntryId;
           const tokensBefore = serverResult?.usage.input_tokens ?? clientResult!.tokensBefore;
           // Estimate tokens after compaction by summing token estimates for remaining messages

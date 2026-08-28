@@ -320,6 +320,44 @@ describe("compactContextEngineWithSafetyTimeout", () => {
     await expect(settled).rejects.toBe(reason);
   });
 
+  it("bounds built-in preparation before the native watchdog starts", async () => {
+    vi.useFakeTimers();
+    const compact = markRuntimeCompactionDelegate(
+      vi.fn<CompactFn>(() => new Promise<CompactResult>(() => {})),
+    );
+    const pending = compactContextEngineWithSafetyTimeout(makeEngine(compact), baseParams, 30);
+    const assertion = expect(pending).rejects.toThrow("Compaction timed out");
+
+    await vi.advanceTimersByTimeAsync(30);
+    await assertion;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("refreshes the built-in watchdog when native compaction reports progress", async () => {
+    vi.useFakeTimers();
+    let resolveCompact!: (result: CompactResult) => void;
+    let resetTimeout!: () => void;
+    const result: CompactResult = { ok: true, compacted: false };
+    const compact = markRuntimeCompactionDelegate(
+      vi.fn<CompactFn>((params) => {
+        resetTimeout = (params.runtimeContext as { compactionTimeoutReset: () => void })
+          .compactionTimeoutReset;
+        return new Promise<CompactResult>((resolve) => {
+          resolveCompact = resolve;
+        });
+      }),
+    );
+    const pending = compactContextEngineWithSafetyTimeout(makeEngine(compact), baseParams, 30);
+
+    await vi.advanceTimersByTimeAsync(20);
+    resetTimeout();
+    await vi.advanceTimersByTimeAsync(20);
+    resolveCompact(result);
+
+    await expect(pending).resolves.toBe(result);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("threads a signal that follows the run abort signal into the plugin compact() params", async () => {
     // Plugin context engines receive an abort signal derived from the run signal
     // so they can stop work promptly.
