@@ -320,27 +320,20 @@ export function markPostCompactionModelFailure(operation: ReplyOperation | undef
   }
 }
 
-export function renderPostCompactionFailurePayloads(
+export function renderPostCompactionFailurePayload(
   operation: ReplyOperation | undefined,
-  payloads: ReplyPayload[],
-): ReplyPayload[] {
+  payload: ReplyPayload,
+): ReplyPayload {
   const outcome = operation?.postCompactionOutcome;
-  if (outcome?.kind !== "later_model_failed") {
-    return payloads;
-  }
-  return payloads.map((payload) => {
-    if (
-      payload.isError !== true ||
-      !isReplyPayloadTerminalContent(payload) ||
-      typeof payload.text !== "string"
-    ) {
-      return payload;
-    }
-    return {
-      ...payload,
-      text: `⚠️ Context compaction succeeded, but the later model request still failed. ${payload.text.replace(/^⚠️\s*/u, "")}`,
-    };
-  });
+  return outcome?.kind === "later_model_failed" &&
+    payload.isError === true &&
+    isReplyPayloadTerminalContent(payload) &&
+    typeof payload.text === "string"
+    ? {
+        ...payload,
+        text: `⚠️ Context compaction succeeded, but the later model request still failed. ${payload.text.replace(/^⚠️\s*/u, "")}`,
+      }
+    : payload;
 }
 
 export function buildTerminalAgentRunFailureReplyPayload(params: {

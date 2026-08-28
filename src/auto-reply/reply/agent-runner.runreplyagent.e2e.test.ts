@@ -1375,7 +1375,7 @@ describe("runReplyAgent MCP App channel action", () => {
 });
 
 describe("runReplyAgent post-compaction failure", () => {
-  it("keeps successful compaction visible after retry and fallback failure", async () => {
+  it("carries successful compaction to dispatch after retry and fallback failure", async () => {
     state.runEmbeddedAgentMock
       .mockImplementationOnce(async (params: AgentRunParams) => {
         if (!params.onAutoCompaction) {
@@ -1426,9 +1426,7 @@ describe("runReplyAgent post-compaction failure", () => {
       count: 1,
     });
     expect(replyOperation.result).toMatchObject({ kind: "failed" });
-    expect(payload?.text).toBe(
-      `⚠️ Context compaction succeeded, but the later model request still failed. ${BILLING_ERROR_USER_MESSAGE.replace(/^⚠️\s*/u, "")}`,
-    );
+    expect(payload?.text).toBe(BILLING_ERROR_USER_MESSAGE);
   });
 
   it("does not call a later persistence failure a model failure", async () => {

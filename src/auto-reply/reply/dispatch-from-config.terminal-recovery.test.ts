@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { BILLING_ERROR_USER_MESSAGE } from "../../agents/failover/user-copy.js";
 import { readAgentRunTerminalOutcome } from "../../channels/turn/agent-run-terminal-outcome.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { ReplyPayload } from "../types.js";
@@ -98,6 +99,23 @@ describe("dispatchReplyFromConfig terminal visible admission recovery", () => {
     expect(readAgentRunTerminalOutcome(result)).toBe("completed");
     expect(replyResolver).toHaveBeenCalledTimes(1);
     expect(dispatchParams.dispatcher.sendFinalReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders successful compaction after dispatcher normalization", async () => {
+    const dispatchParams = createVisibleDispatchParams(async (_ctx, options) => {
+      const operation = options?.replyOperation;
+      if (operation) {
+        operation.postCompactionOutcome = { kind: "later_model_failed", count: 1 };
+      }
+      return { text: BILLING_ERROR_USER_MESSAGE, isError: true };
+    });
+
+    await dispatchReplyFromConfig(dispatchParams);
+
+    expect(dispatchParams.dispatcher.sendFinalReply).toHaveBeenCalledWith({
+      text: `⚠️ Context compaction succeeded, but the later model request still failed. ${BILLING_ERROR_USER_MESSAGE.replace(/^⚠️\s*/u, "")}`,
+      isError: true,
+    });
   });
 
   it("records a failed reply operation when recovering a visible partial", async () => {
