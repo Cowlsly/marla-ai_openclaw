@@ -138,6 +138,28 @@ final class GatewayProcessManager {
     private(set) var environmentStatus: GatewayEnvironmentStatus = .checking
     private(set) var existingGatewayDetails: String?
     private(set) var lastFailureReason: String?
+
+    enum Installation {
+        case managed, external, unreadable
+
+        static let ownershipFailure =
+            "Could not read the Gateway service ownership record. Check the Gateway LaunchAgent and retry."
+    }
+
+    var installation: Installation {
+        if GatewayLaunchAgentManager.isLaunchAgentWriteDisabled() { return .external }
+        guard let arguments = GatewayLaunchAgentManager.launchdProgramArguments() else { return .unreadable }
+        if !arguments.isEmpty {
+            return CLIInstallPrompter.launchAgentUsesManagedCLI(programArguments: arguments) ? .managed : .external
+        }
+        // Attaching is not ownership: an app-managed Gateway can already be running.
+        // Only an attachment without a managed service record skips local CLI setup.
+        switch self.status {
+        case .running, .attachedExisting: return .external
+        case .stopped, .starting, .failed: return .managed
+        }
+    }
+
     private var desiredActive = false
     private var environmentRefreshTask: Task<Void, Never>?
     private var lastEnvironmentRefresh: Date?

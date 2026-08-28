@@ -31,6 +31,60 @@ private func makeOnboardingResumeDefaults() throws -> (UserDefaults, String) {
 @Suite(.serialized)
 @MainActor
 struct OnboardingViewSmokeTests {
+    @Test(arguments: [
+        "remote",
+        "attach-only",
+        "external-attachment",
+        "managed-attachment",
+        "external-service",
+        "unreadable",
+        "fresh",
+    ])
+    func `onboarding installs only for an app-managed local Gateway`(_ scenario: String) async throws {
+        let root = try makeTempDirForTests()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await TestIsolation.withIsolatedState(env: ["HOME": root.path, "CFFIXED_USER_HOME": root.path]) {
+            try #require(FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL == root
+                .standardizedFileURL)
+            let marker = root.appendingPathComponent("disable-launchagent")
+            if scenario == "attach-only" { try Data().write(to: marker) }
+            GatewayLaunchAgentManager.setTestingDisableLaunchAgentMarkerURL(marker)
+            let manager = GatewayProcessManager.shared
+            let previousStatus = manager.status
+            defer {
+                GatewayLaunchAgentManager.setTestingDisableLaunchAgentMarkerURL(nil)
+                manager.setTestingStatus(previousStatus)
+            }
+            manager.setTestingStatus(scenario.contains("attachment") ? .attachedExisting(details: nil) : .stopped)
+            let plist = GatewayLaunchAgentManager.plistURL(homeDirectory: root, profile: AppProfile(environment: [:]))
+            if ["managed-attachment", "external-service", "unreadable"].contains(scenario) {
+                try FileManager.default.createDirectory(
+                    at: plist.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                let executable = scenario == "managed-attachment"
+                    ? CLIInstaller.managedExecutableLocation()
+                    : "/opt/openclaw/bin/openclaw"
+                let data = scenario == "unreadable" ? Data("not a plist".utf8) : try PropertyListSerialization.data(
+                    fromPropertyList: ["ProgramArguments": [executable, "gateway"]], format: .xml, options: 0)
+                try data.write(to: plist)
+            }
+            let state = AppState(preview: true)
+            state.onboardingSeen = false
+            state.connectionMode = scenario == "remote" ? .remote : .local
+            let view = OnboardingView(state: state)
+            let requiresSetup = ["managed-attachment", "unreadable", "fresh"].contains(scenario)
+
+            #expect(!view.cliInstalled)
+            #expect(view.pageOrder == (requiresSetup ? [0, 1, 2, 3] : [0, 1, 3]))
+            #expect(view.activePageIndex(for: 2) == (requiresSetup ? view.cliPageIndex : view.aiPageIndex))
+            if !requiresSetup {
+                await view.runCLIInstall()
+                #expect(OnboardingController.shared.busyReason == nil)
+                #expect(!FileManager.default.fileExists(atPath: CLIInstaller.managedExecutableLocation()))
+            }
+        }
+    }
+
     @Test func `discovered gateway summary uses localized runtime strings`() {
         #expect(
             OnboardingView.remoteChoiceSubtitle(discoveredGatewayCount: 1) ==
@@ -110,7 +164,7 @@ struct OnboardingViewSmokeTests {
             requiresCLIInstall: false) == [0, 1, 3])
         #expect(OnboardingView.pageOrder(
             for: .remote,
-            requiresCLIInstall: true) == [0, 1, 2, 3])
+            requiresCLIInstall: true) == [0, 1, 3])
         #expect(OnboardingView.pageOrder(
             for: .remote,
             requiresCLIInstall: false) == [0, 1, 3])
@@ -137,11 +191,6 @@ struct OnboardingViewSmokeTests {
             requiresCLIInstall: false)
 
         #expect(!order.contains(2))
-    }
-
-    @Test func `CLI install activates only a local gateway`() {
-        #expect(!OnboardingView.shouldActivateLocalGateway(afterCLIInstallFor: .remote))
-        #expect(OnboardingView.shouldActivateLocalGateway(afterCLIInstallFor: .local))
     }
 
     @Test func `fresh onboarding defaults to this Mac`() {
@@ -224,30 +273,6 @@ struct OnboardingViewSmokeTests {
             executableReady: true,
             installed: false,
             installing: false))
-    }
-
-    @Test func `detected CLI follows the selected onboarding connection mode`() {
-        #expect(OnboardingView.existingCLISetupMode(
-            connectionMode: .remote,
-            executableReady: true,
-            installing: false) == .remote)
-        #expect(OnboardingView.existingCLISetupMode(
-            connectionMode: .local,
-            executableReady: true,
-            installing: false) == .local)
-        #expect(OnboardingView.existingCLISetupMode(
-            connectionMode: .unconfigured,
-            executableReady: true,
-            installing: false) == nil)
-        #expect(OnboardingView.existingCLISetupMode(
-            connectionMode: .local,
-            executableReady: true,
-            installing: true) == nil)
-        #expect(OnboardingView.existingCLISetupMode(
-            connectionMode: .remote,
-            executableReady: false,
-            installing: false) == nil)
-        #expect(!OnboardingView.shouldActivateLocalGateway(afterCLIInstallFor: .remote))
     }
 
     @Test func `paused gateway keeps CLI setup and recovery visible after every install path`() {

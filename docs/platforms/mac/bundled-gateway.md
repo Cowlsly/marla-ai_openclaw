@@ -38,6 +38,11 @@ Gateway setup still needs an internet connection to download its separate
 runtime and matching OpenClaw package. The bundled installer owns that setup;
 the private worker is not a replacement for a CLI or Gateway installation.
 
+Remote connections and attachment to an independently managed local Gateway
+skip this installation. Attach-only mode never prompts for a CLI to run the
+app's node. An unreadable service ownership record blocks automatic installation
+instead of being treated as a missing service; check the LaunchAgent and retry.
+
 ## Manual recovery
 
 For a manual install, use Node 26 (recommended) or another supported release:
@@ -114,10 +119,11 @@ worker error; rebuild or reinstall the app. Changing CLI channels or updating
 a global CLI does not repair this private payload. Unbundled Swift development
 builds can use the checkout's freshness-aware source runner instead.
 
-The macOS app checks the Gateway version against its own version. Onboarding
-automatically runs managed setup when an existing CLI is missing or
-incompatible. Use **Retry setup** to repeat installation, or **Check again**
-after repairing an external CLI.
+For an app-owned local Gateway, the macOS app checks the external CLI against
+its install policy. Onboarding runs managed setup when that CLI is missing or
+incompatible. An attached Gateway uses connection and health checks instead of
+local CLI installation diagnostics. Use **Retry setup** after a failed managed
+installation, or **Recheck** in Connection settings after repairing it.
 
 ## State directory on macOS
 
