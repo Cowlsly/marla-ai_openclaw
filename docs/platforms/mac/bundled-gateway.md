@@ -26,6 +26,12 @@ device-auth, device-identity, and exec-approval migrations; this is not a promis
 that all worker startup is read-only. Public `node run`, Gateway, and Doctor
 retain their existing startup policies.
 
+When the native app creates identity, device-auth, or approval tables before
+the worker starts, node startup completes that recognized version-zero database
+through the canonical initializer before plugins read their state. Existing
+native rows are preserved. This does not migrate an already-versioned shared
+Gateway database or adopt unknown or occupied bootstrap state.
+
 ## Automatic setup
 
 On a fresh Mac, choose **This Mac** during onboarding. The app runs its
@@ -40,7 +46,8 @@ the private worker is not a replacement for a CLI or Gateway installation.
 
 Remote connections and attachment to an independently managed local Gateway
 skip this installation. Attach-only mode never prompts for a CLI to run the
-app's node. An unreadable service ownership record blocks automatic installation
+app's node. Pausing or reconnecting does not turn an observed independent local
+attachment into an app-managed installation. An unreadable service ownership record blocks automatic installation
 instead of being treated as a missing service; check the LaunchAgent and retry.
 
 ## Manual recovery

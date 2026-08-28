@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  seedMacNodeWorkerProofState,
+  readMacNodeWorkerProofRows,
+} from "../../scripts/lib/mac-node-worker-proof-state.mjs";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
   getRuntimeConfig,
@@ -16,6 +21,7 @@ import {
 } from "../node-host/plugin-node-host.test-support.js";
 import { prepareNodeHostRuntime } from "../node-host/runtime.js";
 import { runStartupMigrations } from "../node-host/startup-state-migrations.js";
+import { createPluginStateSyncKeyedStore } from "../plugin-state/plugin-state-store.js";
 import {
   cleanupPluginLoaderFixturesForTest,
   resetPluginLoaderTestStateForTest,
@@ -151,6 +157,64 @@ function readGatewayState() {
 }
 
 describe("private node worker bootstrap", () => {
+  it.each(["unknown", "metadata", "lease", "future", "corrupt"])(
+    "does not adopt %s state as native bootstrap",
+    async (shape) => {
+      const { stateDir } = fixture();
+      const databasePath = path.join(stateDir, "state", "openclaw.sqlite");
+      seedMacNodeWorkerProofState(databasePath);
+      const db = new DatabaseSync(databasePath);
+      if (shape === "unknown") {
+        db.exec("CREATE TABLE unrelated (value TEXT)");
+      }
+      if (shape === "metadata") {
+        db.exec(
+          "CREATE TABLE schema_meta (meta_key TEXT); INSERT INTO schema_meta VALUES ('occupied')",
+        );
+      }
+      if (shape === "lease") {
+        db.exec(
+          "CREATE TABLE state_leases (owner TEXT); INSERT INTO state_leases VALUES ('occupied')",
+        );
+      }
+      if (shape === "future") {
+        db.exec("PRAGMA user_version = 999");
+      }
+      db.close();
+      if (shape === "corrupt") {
+        fs.writeFileSync(databasePath, "not a SQLite database");
+      }
+      const before = fs.readFileSync(databasePath);
+      const startup = runStartupMigrations({ log: { info: vi.fn(), warn: vi.fn() } });
+      if (shape === "future" || shape === "corrupt") {
+        await expect(startup).rejects.toThrow();
+      } else {
+        await expect(startup).resolves.toBeUndefined();
+      }
+      expect(fs.readFileSync(databasePath)).toEqual(before);
+    },
+  );
+
+  it("initializes native bootstrap before plugin state reads without losing native rows", async () => {
+    const { stateDir } = fixture();
+    const databasePath = path.join(stateDir, "state", "openclaw.sqlite");
+    const rows = seedMacNodeWorkerProofState(databasePath);
+    await bootstrap();
+    await runStartupMigrations({ log: { info: vi.fn(), warn: vi.fn() } });
+    const store = createPluginStateSyncKeyedStore("fixture-node", {
+      namespace: "bootstrap-proof",
+      maxEntries: 10,
+    });
+    expect(store.entries()).toEqual([]);
+    closeOpenClawStateDatabaseForTest();
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(readMacNodeWorkerProofRows(database)).toEqual(rows);
+    } finally {
+      database.close();
+    }
+  });
+
   it.each([false, true])(
     "pins core config and preserves Gateway state (seeded=%s)",
     async (seeded) => {
