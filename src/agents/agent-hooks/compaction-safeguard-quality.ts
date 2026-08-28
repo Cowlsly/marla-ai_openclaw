@@ -131,6 +131,13 @@ function parseRequiredSummarySectionContents(summary: string): string[] | null {
   return contents.map((lines) => lines.join("\n").trim());
 }
 
+function parsePendingUserAskSections(summary: string): string[] {
+  return summary
+    .split(/^## Pending user asks[ \t]*$/gmu)
+    .slice(1)
+    .map((section) => section.split(/^##[ \t]+\S.*$/mu, 1)[0]?.trim() ?? "");
+}
+
 /**
  * Plan truncation that keeps the audit facts and lets everything else shrink.
  * Only the headings, the bounded latest-ask context, and the audited source
@@ -146,6 +153,7 @@ export function createSummaryQualityRetentionPlan(
     auditSummary?: string;
     identifiers: string[];
     latestAsk: string | null;
+    latestAskCompleted?: boolean;
     requiredAskContext?: string;
     identifierPolicy?: CompactionSummarizationInstructions["identifierPolicy"];
   },
@@ -153,7 +161,7 @@ export function createSummaryQualityRetentionPlan(
   const requiredAskContext = params.requiredAskContext?.trim() ?? "";
   const bodyHasLatestAsk = hasAskOverlap(params.auditSummary ?? summary, params.latestAsk);
   const requiredContextBlock =
-    bodyHasLatestAsk && requiredAskContext
+    (bodyHasLatestAsk || params.latestAskCompleted) && requiredAskContext
       ? `## Latest user request context\n${JSON.stringify(requiredAskContext)}`
       : "";
   const parsedSummary =
@@ -170,7 +178,7 @@ export function createSummaryQualityRetentionPlan(
   // Keep the model's completed/pending classification unchanged. When it reflects the ask,
   // preserve exact source text in a neutral prefix; when it omits the ask, fail safe to Pending.
   const protectedAskContext =
-    !bodyHasLatestAsk && requiredAskContext
+    !bodyHasLatestAsk && !params.latestAskCompleted && requiredAskContext
       ? `${LATEST_USER_REQUEST_CONTEXT_LABEL}\n${JSON.stringify(requiredAskContext)}`
       : "";
   const protectedTails = REQUIRED_SUMMARY_SECTIONS.map((_, index) =>
@@ -424,6 +432,7 @@ export function auditSummaryQuality(params: {
   sourceSummaries?: string[];
   identifiers: string[];
   latestAsk: string | null;
+  latestAskCompleted?: boolean;
   identifierPolicy?: CompactionSummarizationInstructions["identifierPolicy"];
 }): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
@@ -451,6 +460,16 @@ export function auditSummaryQuality(params: {
   }
   if (!hasAskOverlap(params.summary, params.latestAsk)) {
     reasons.push("latest_user_ask_not_reflected");
+  }
+  if (
+    params.latestAskCompleted &&
+    params.sourceSummaries?.some((source) =>
+      parsePendingUserAskSections(source).some((pendingAsks) =>
+        hasAskOverlap(pendingAsks, params.latestAsk),
+      ),
+    )
+  ) {
+    reasons.push("completed_latest_user_ask_marked_pending");
   }
   return { ok: reasons.length === 0, reasons };
 }
