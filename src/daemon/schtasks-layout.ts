@@ -17,6 +17,7 @@ import type {
   GatewayServiceEnv,
   GatewayServiceRenderArgs,
 } from "./service-types.js";
+import { WINDOWS_TASK_SUPERVISOR_FLAG } from "./windows-task-supervisor-contract.js";
 
 export function resolveTaskName(env: GatewayServiceEnv): string {
   const override = env.OPENCLAW_WINDOWS_TASK_NAME?.trim();
@@ -156,6 +157,10 @@ export function buildScheduledTaskXml(params: {
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
@@ -258,7 +263,11 @@ export async function readScheduledTaskCommand(
     }
     const hasEnvironment = Object.keys(environment).length > 0;
     return {
-      programArguments: parseCmdScriptCommandLine(commandLine),
+      // The task-only outer process owns the Job Object; diagnostics and lifecycle
+      // controls must compare against its inner Gateway child, which omits this flag.
+      programArguments: parseCmdScriptCommandLine(commandLine).filter(
+        (argument) => argument !== WINDOWS_TASK_SUPERVISOR_FLAG,
+      ),
       ...(workingDirectory ? { workingDirectory } : {}),
       ...(hasEnvironment ? { environment } : {}),
       ...(hasEnvironment
@@ -308,9 +317,11 @@ export function buildTaskScript({
   // `process.stdin.isTTY` reports true and interactive permission prompts
   // block forever on a console no one can see (#112173). With stdin at NUL
   // the gateway and its workers correctly take non-interactive paths.
-  lines.push(
-    `${programArguments.map((arg) => quoteCmdScriptArg(arg)).join(" ")} ${STDIN_NUL_REDIRECT}`,
-  );
+  const commandArguments =
+    environment?.OPENCLAW_SERVICE_KIND === "gateway"
+      ? [...programArguments, WINDOWS_TASK_SUPERVISOR_FLAG]
+      : programArguments;
+  lines.push(`${commandArguments.map(quoteCmdScriptArg).join(" ")} ${STDIN_NUL_REDIRECT}`);
   return `${lines.join("\r\n")}\r\n`;
 }
 
@@ -352,7 +363,7 @@ export function buildHiddenLauncherScript(params: {
     lines.push(`' ${trimmedDescription}`);
   }
   lines.push(
-    `CreateObject("WScript.Shell").Run ${quoteVbsRunCommand(params.scriptPath)}, 0, False`,
+    `WScript.Quit CreateObject("WScript.Shell").Run(${quoteVbsRunCommand(params.scriptPath)}, 0, True)`,
   );
   return `${lines.join("\r\n")}\r\n`;
 }

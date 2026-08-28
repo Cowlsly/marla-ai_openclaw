@@ -201,6 +201,8 @@ export type EmbeddedAgentRunMeta = {
   yielded?: boolean;
   /** Explicit user-facing waiting status supplied to sessions_yield. */
   yieldAcknowledgment?: string;
+  /** A visible parent delegated its otherwise-empty result to completion children. */
+  continuationPending?: true;
   error?: {
     kind:
       | "context_overflow"

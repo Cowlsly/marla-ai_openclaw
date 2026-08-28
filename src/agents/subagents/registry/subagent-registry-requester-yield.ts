@@ -179,6 +179,14 @@ export function settleRequesterTurnAfterSessionSpawns(params: {
   ) {
     // Active children keep the frozen batch; their normal completion owner schedules it.
     params.schedule(firstEntry.runId, firstEntry);
+  } else if (entries.every((entry) => typeof entry.execution.endedAt === "number")) {
+    // A terminal child cannot wake while its requester still owns the turn.
+    // Once a normal parent response settles, resume its original per-child delivery.
+    for (const entry of entries) {
+      if (params.runs.has(entry.runId)) {
+        params.schedule(entry.runId, entry);
+      }
+    }
   }
   return true;
 }

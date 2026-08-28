@@ -15,6 +15,7 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { inspectPortUsage } from "../../infra/ports-inspect.js";
 import { LOOPBACK_PORT_PROBE_HOSTS } from "../../infra/ports-probe.js";
 import type { PortUsage } from "../../infra/ports-types.js";
+import { sleep } from "../../utils.js";
 import type { GatewayPortHealthSnapshot } from "./restart-health.types.js";
 import { allListenersOwnedByRuntimePid } from "./restart-port-ownership.js";
 
@@ -31,6 +32,62 @@ export type GatewayReachability = {
   channelProbeErrors: Array<{ id: string; error: string }>;
   probeError?: string;
 };
+
+export type GatewayHttpReadiness = {
+  healthz: number | null;
+  readyz: number | null;
+};
+
+async function requestGatewayHttpStatus(
+  port: number,
+  pathname: "/healthz" | "/readyz",
+  timeoutMs: number,
+) {
+  if (timeoutMs <= 0) {
+    return null;
+  }
+  try {
+    return (
+      await fetch(`http://127.0.0.1:${port}${pathname}`, {
+        signal: AbortSignal.timeout(Math.min(timeoutMs, 3_000)),
+      })
+    ).status;
+  } catch {
+    return null;
+  }
+}
+
+/** Waits for the unauthenticated HTTP readiness contracts reported by service start. */
+export async function waitForGatewayHttpReadiness(params: {
+  attempts: number;
+  deadlineAt: number;
+  delayMs: number;
+  port: number;
+}): Promise<GatewayHttpReadiness> {
+  let latest: GatewayHttpReadiness = { healthz: null, readyz: null };
+  for (let attempt = 0; attempt < params.attempts; attempt += 1) {
+    const remainingMs = params.deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      return latest;
+    }
+    const [healthz, readyz] = await Promise.all([
+      requestGatewayHttpStatus(params.port, "/healthz", remainingMs),
+      requestGatewayHttpStatus(params.port, "/readyz", remainingMs),
+    ]);
+    latest = { healthz, readyz };
+    if (healthz === 200 && readyz === 200) {
+      return latest;
+    }
+    if (attempt + 1 < params.attempts) {
+      const remainingDelayMs = params.deadlineAt - Date.now();
+      if (remainingDelayMs <= 0) {
+        return latest;
+      }
+      await sleep(Math.min(params.delayMs, remainingDelayMs));
+    }
+  }
+  return latest;
+}
 
 function formatGatewayRestartProbeError(error: unknown): string {
   return truncateUtf16Safe(

@@ -4,11 +4,11 @@ import {
   buildEmbeddedRunnerAssistant,
   makeEmbeddedRunnerAttempt,
 } from "../../test-helpers/embedded-agent-runner-e2e-fixtures.js";
+import { copyAttemptDeliveryState } from "./attempt-delivery-state.js";
 import { createEmbeddedRunContextRecoveryState } from "./context-recovery-state.js";
 import { TRUNCATED_REPLY_NOTICE_TEXT } from "./incomplete-turn-resolution.js";
 import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
 import {
-  copyAttemptDeliveryState,
   createTerminalToolPresentationTracker,
   resolveEmbeddedRunTerminal,
   resolveSettledTurnFinalizationRequest,
@@ -339,6 +339,74 @@ describe("terminal resolution", () => {
     expect(resolved.result.meta.terminalReplyKind).toBe("silent-empty");
     expect(resolved.result.meta.livenessState).toBe("working");
     expect(activateInternalPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps an empty visible parent alive for accepted completion children", async () => {
+    const attempt = makeEmbeddedRunnerAttempt({
+      acceptedSessionSpawns: [{ runId: "child-run", childSessionKey: "agent:main:subagent:child" }],
+    });
+
+    const resolved = await resolveEmbeddedRunTerminal(
+      makeTerminalInput({
+        attempt,
+        runParams: { replyOperation: { turnKind: "visible" } as never },
+      }),
+    );
+
+    expect(resolved.action).toBe("complete");
+    if (resolved.action !== "complete") {
+      return;
+    }
+    expect(resolved.result.payloads).toEqual([
+      { text: "I’m continuing this work and will send the result when it is ready." },
+    ]);
+    expect(resolved.result.meta.continuationPending).toBe(true);
+  });
+
+  it("does not add a continuation status when the parent already replied", async () => {
+    const text = "The work is complete.";
+    const assistant = buildEmbeddedRunnerAssistant({ content: [{ type: "text", text }] });
+    const attempt = makeEmbeddedRunnerAttempt({
+      assistantTexts: [text],
+      acceptedSessionSpawns: [{ runId: "child-run", childSessionKey: "agent:main:subagent:child" }],
+      currentAttemptAssistant: assistant,
+      lastAssistant: assistant,
+    });
+
+    const resolved = await resolveEmbeddedRunTerminal(
+      makeTerminalInput({
+        attempt,
+        attemptAssistant: assistant,
+        payloadsWithToolMedia: [{ text }],
+        runParams: { replyOperation: { turnKind: "visible" } as never },
+      }),
+    );
+
+    expect(resolved.action).toBe("complete");
+    if (resolved.action === "complete") {
+      expect(resolved.result.payloads).toEqual([{ text }]);
+      expect(resolved.result.meta.continuationPending).toBeUndefined();
+    }
+  });
+
+  it("does not add a continuation status after an unelaborated message delivery", async () => {
+    const attempt = makeEmbeddedRunnerAttempt({
+      didSendViaMessagingTool: true,
+      acceptedSessionSpawns: [{ runId: "child-run", childSessionKey: "agent:main:subagent:child" }],
+    });
+
+    const resolved = await resolveEmbeddedRunTerminal(
+      makeTerminalInput({
+        attempt,
+        runParams: { replyOperation: { turnKind: "visible" } as never },
+      }),
+    );
+
+    expect(resolved.action).toBe("complete");
+    if (resolved.action === "complete") {
+      expect(resolved.result.payloads).toBeUndefined();
+      expect(resolved.result.meta.continuationPending).toBeUndefined();
+    }
   });
 
   it.each([

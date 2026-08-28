@@ -20,6 +20,7 @@ import {
   syncDevicePairSetupCountdown,
 } from "../lib/device-pair-setup.ts";
 import { formatUiError } from "../lib/format-error.ts";
+import type { ConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
 import {
   clearExecApprovalTimers,
   clearResolvedExecApprovalPrompt,
@@ -71,6 +72,7 @@ function isGatewayEvent(value: unknown): value is GatewayEventFrame {
 export function createApplicationOverlays(
   gateway: ApplicationGateway,
   hooks: {
+    connectionBootstrap?: ConnectionBootstrapCoordinator;
     /** Barrier awaited after update-running is published and before update.run
      * is issued, so in-flight config writes cannot overlap the install. */
     drainConfigWrites?: () => Promise<void>;
@@ -340,6 +342,7 @@ export function createApplicationOverlays(
       publish();
       return;
     }
+    const client = next.client;
     const serverBuildIdentity = {
       version: next.hello?.server?.version,
       buildId: next.hello?.server?.buildId,
@@ -363,16 +366,32 @@ export function createApplicationOverlays(
       devicePairSetupState.devicePairSetupOpen &&
       (operatorAccess.canAdmin || operatorAccess.canPair)
     ) {
-      void pairingPendingCount.refresh();
+      void (
+        hooks.connectionBootstrap?.run("pairing-pending-count", () =>
+          pairingPendingCount.refresh(),
+        ) ?? pairingPendingCount.refresh()
+      ).catch(() => undefined);
     }
     if (connectedSourceChanged) {
       connectedEpoch += 1;
       if (operatorAccess.canReviewApprovals) {
-        void refreshApprovals(next.client, connectedEpoch, approvalAccessGeneration);
+        void (
+          hooks.connectionBootstrap?.run("approvals", () =>
+            refreshApprovals(client, connectedEpoch, approvalAccessGeneration),
+          ) ?? refreshApprovals(client, connectedEpoch, approvalAccessGeneration)
+        ).catch(() => undefined);
       }
-      void updateVerification.verify(next.client, connectedEpoch);
+      void (
+        hooks.connectionBootstrap?.run("update-verification", () =>
+          updateVerification.verify(client, connectedEpoch),
+        ) ?? updateVerification.verify(client, connectedEpoch)
+      ).catch(() => undefined);
     } else if (accessTransition.reviewChanged && operatorAccess.canReviewApprovals) {
-      void refreshApprovals(next.client, connectedEpoch, approvalAccessGeneration);
+      void (
+        hooks.connectionBootstrap?.run("approvals", () =>
+          refreshApprovals(client, connectedEpoch, approvalAccessGeneration),
+        ) ?? refreshApprovals(client, connectedEpoch, approvalAccessGeneration)
+      ).catch(() => undefined);
     }
   };
   const stopGateway = gateway.subscribe(synchronizeGateway);

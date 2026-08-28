@@ -308,7 +308,7 @@ export function scheduleRequesterSettleWake(
     entry.execution.status === "running" ||
     !hasSubagentRunEnded(entry) ||
     !requesterSessionKey ||
-    (entry.requesterTurnRunId && entry.requesterTurnYielded === true) ||
+    entry.requesterTurnRunId ||
     context.hasScheduledRequesterSettleWakeRun(runId)
   ) {
     return;

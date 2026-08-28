@@ -361,16 +361,23 @@ export async function installScheduledTask(
   if (takeoverRuntime?.status === "running" && takeoverRuntime.pid) {
     // The old launcher can still own the listener; terminate it and prove the replacement.
     await terminateGatewayProcessTree(takeoverRuntime.pid, 300);
+    let scheduledTaskRunAccepted = false;
     try {
       // Re-reading ownership now would inspect the replacement command, not the captured fallback.
       await restartRegisteredScheduledTask({
         env: activationEnv,
         stdout: args.stdout,
         mode: { kind: "fallback-takeover" },
+        onRunMutation: () => {
+          scheduledTaskRunAccepted = true;
+        },
       });
     } catch (err) {
-      // Restore availability if takeover fails after terminating the captured fallback.
-      await launchFallbackTaskScript(fallbackEnv, installedCommand);
+      // An accepted /Run can still start later. Replacing it with a detached Gateway
+      // would defeat Scheduler's single-instance policy and create a duplicate listener.
+      if (!scheduledTaskRunAccepted) {
+        await launchFallbackTaskScript(fallbackEnv, installedCommand);
+      }
       throw err;
     }
   } else if (

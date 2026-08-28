@@ -19,6 +19,11 @@ export type ReplySessionBinding = {
   storePath?: string;
 };
 
+export type PendingContinuationSettlement = {
+  statusPayload: ReplyPayload;
+  settle: (statusDelivered: boolean) => Promise<void>;
+};
+
 type InternalReplySessionOptions = {
   /** Host-stamped exact-run capability for late Codex creator-authority capture. */
   cronCreatorAuthorityCapability?: CronCreatorAuthorityCapability;
@@ -26,7 +31,8 @@ type InternalReplySessionOptions = {
   /** First dispatch only: admission created this exact pinned session before reply initialization. */
   newlyCreatedSessionId?: string;
   onDeliberateSilentTerminalReply?: () => void;
-  onPendingContinuation?: () => void;
+  /** Defers the child-completion wake until the visible waiting status is delivered. */
+  onPendingContinuation?: (settlement?: PendingContinuationSettlement) => void;
   onSessionPrepared?: (binding: ReplySessionBinding) => void;
   /** Prevent implicit rollover after a caller has durably admitted this exact session. */
   pinExpectedExistingSession?: boolean;

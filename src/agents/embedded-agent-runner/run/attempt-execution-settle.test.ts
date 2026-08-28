@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   logDebug: vi.fn(),
   logError: vi.fn(),
   logWarn: vi.fn(),
+  markRequesterTurnYielded: vi.fn(() => 1),
   settleRequesterAfterSessionSpawns: vi.fn(),
   settleStream: vi.fn(),
   runPrompt: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("../../subagents/registry/subagent-registry.js", async (importOriginal) 
     await importOriginal<typeof import("../../subagents/registry/subagent-registry.js")>();
   return {
     ...actual,
+    markRequesterTurnYielded: mocks.markRequesterTurnYielded,
     settleRequesterAfterSessionSpawns: mocks.settleRequesterAfterSessionSpawns,
   };
 });
@@ -219,7 +221,7 @@ function createFixture() {
       modelId: "model",
       promptCacheKey: undefined,
       provider: "openai",
-      replyOperation: { detachBackend },
+      replyOperation: { detachBackend, turnKind: "visible" },
       runId: "run-1",
       sessionFile: "/tmp/session.jsonl",
       sessionId: "session-1",
@@ -663,6 +665,8 @@ describe("runEmbeddedAttemptSettledPhase", () => {
     const fixture = createFixture();
     mocks.completeResult.mockReturnValueOnce({
       ...fixture.result,
+      assistantTexts: ["done"],
+      terminal: { kind: "ok" },
       yieldDetected: false,
       acceptedSessionSpawns: [{ runId: "child-run", childSessionKey: "agent:main:subagent:child" }],
     });
@@ -678,7 +682,31 @@ describe("runEmbeddedAttemptSettledPhase", () => {
     });
   });
 
-  it("surfaces durable re-arm failures after releasing the active requester", async () => {
+  it("marks an empty visible requester for status-gated continuation delivery", async () => {
+    const fixture = createFixture();
+    mocks.completeResult.mockReturnValueOnce({
+      ...fixture.result,
+      assistantTexts: [],
+      messagingToolSentMediaUrls: [],
+      messagingToolSentTargets: [],
+      messagingToolSentTexts: [],
+      terminal: { kind: "ok" },
+      toolMetas: [],
+      yieldDetected: false,
+      acceptedSessionSpawns: [{ runId: "child-run", childSessionKey: "agent:main:subagent:child" }],
+    });
+
+    await runEmbeddedAttemptSettledPhase(fixture.input);
+
+    expect(mocks.markRequesterTurnYielded).toHaveBeenCalledWith({
+      requesterSessionKey: "agent:main",
+      requesterAgentId: "main",
+      requesterTurnRunId: "run-1",
+    });
+    expect(mocks.settleRequesterAfterSessionSpawns).not.toHaveBeenCalled();
+  });
+
+  it("surfaces durable yield-settlement failures after releasing the active requester", async () => {
     const fixture = createFixture();
     const failure = new Error("sqlite unavailable");
     mocks.completeResult.mockReturnValueOnce({

@@ -10,6 +10,7 @@ import {
 } from "../components/panel-toggle-contract.ts";
 import { i18n, isSupportedLocale } from "../i18n/index.ts";
 import type { ShellRouteState } from "./app-host-route-state.ts";
+import { createConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
 import type { ApplicationContext } from "./context.ts";
 import { hasOperatorWriteAccess } from "./operator-access.ts";
 import {
@@ -89,6 +90,7 @@ function diffAgentRoster(
 }
 
 export class ShellGatewayOwner {
+  private readonly standaloneConnectionBootstrap = createConnectionBootstrapCoordinator();
   private runtimeConfigProfileId: string | null = null;
   private profileAppearanceSource: {
     client: GatewayBrowserClient;
@@ -115,7 +117,7 @@ export class ShellGatewayOwner {
         context.theme.refresh();
       },
     });
-    this.refreshProfileAppearancePrefs(context);
+    void this.refreshProfileAppearancePrefs(context).catch(() => undefined);
     const localePref = resolveServerUiPrefState(snapshot.config, "locale", scope);
     const localePrefSignature = JSON.stringify([scope, localePref.overridden, localePref.value]);
     if (localePrefSignature === this.host.lastLocalePrefSignature) {
@@ -196,7 +198,7 @@ export class ShellGatewayOwner {
         "profileId" in payload &&
         payload.profileId === profileId
       ) {
-        this.refreshProfileAppearancePrefs(context, true);
+        void this.refreshProfileAppearancePrefs(context, true).catch(() => undefined);
       }
       return;
     }
@@ -287,33 +289,50 @@ export class ShellGatewayOwner {
   synchronizeGateway(snapshot: ApplicationContext["gateway"]["snapshot"]): void {
     const previousPhase = this.host.previousGatewayPhase;
     this.host.previousGatewayPhase = snapshot.phase;
+    const connectionBootstrap =
+      this.host.context?.connectionBootstrap ?? this.standaloneConnectionBootstrap;
+    connectionBootstrap.synchronize({
+      client: snapshot.client,
+      connected: snapshot.phase === "connected",
+    });
     this.updateGatewaySessionKey(snapshot);
-    this.ensureAgentsList(snapshot);
-    this.ensureRuntimeConfig(snapshot);
     const context = this.host.context;
-    if (context) {
-      this.refreshProfileAppearancePrefs(context);
+    if (snapshot.phase === "connected" && context) {
+      void connectionBootstrap
+        .run("runtime-config", async () => {
+          await this.ensureRuntimeConfig(snapshot, context.runtimeConfig);
+          await this.refreshProfileAppearancePrefs(context);
+        })
+        .catch(() => undefined);
+      if (this.host.routeState.routeId && !context.agents.state.agentsList) {
+        void connectionBootstrap
+          .run("agents", async () => {
+            await this.ensureAgentsList(snapshot, context.agents);
+          })
+          .catch(() => undefined);
+      }
+      void connectionBootstrap
+        .run("outbox", async () => {
+          await this.host.outboxStoreImport.load();
+        })
+        .catch(() => undefined);
     }
     if (previousPhase !== "connected" && snapshot.phase === "connected") {
       i18n.retryPendingLocale();
     }
     this.host.syncSidebarWorkboard();
-    // Gateway-served chunks retry on reconnect after an earlier idle import failed.
-    if (snapshot.phase === "connected") {
-      void this.host.outboxStoreImport.load().catch(() => undefined);
-    }
   }
 
   ensureRuntimeConfig(
     snapshot: ApplicationContext["gateway"]["snapshot"],
     runtimeConfig = this.host.context?.runtimeConfig,
-  ): void {
+  ): Promise<void> {
     // Config-gated sidebar routes require the snapshot before any settings page opens.
     if (snapshot.phase !== "connected" || !snapshot.client || !runtimeConfig) {
       this.host.runtimeConfigClient = null;
       this.runtimeConfigProfileId = null;
       this.profileAppearanceSource = null;
-      return;
+      return Promise.resolve();
     }
     const profileId = snapshot.selfUser?.id ?? null;
     if (
@@ -321,7 +340,7 @@ export class ShellGatewayOwner {
       this.host.runtimeConfigSource === runtimeConfig &&
       this.runtimeConfigProfileId === profileId
     ) {
-      return;
+      return Promise.resolve();
     }
     this.host.runtimeConfigClient = snapshot.client;
     this.host.runtimeConfigSource = runtimeConfig;
@@ -332,27 +351,27 @@ export class ShellGatewayOwner {
       afterCommit: ({ needsRefresh, retainedLocal }) =>
         this.reconcileCommittedServerUiPrefs(runtimeConfig, needsRefresh, retainedLocal),
     });
-    void runtimeConfig.ensureLoaded();
+    return runtimeConfig.ensureLoaded();
   }
 
   ensureAgentsList(
     snapshot: ApplicationContext["gateway"]["snapshot"],
     agents = this.host.context?.agents,
-  ): void {
+  ): Promise<void> {
     if (snapshot.phase !== "connected" || !snapshot.client) {
       this.host.agentsListClient = null;
-      return;
+      return Promise.resolve();
     }
     const routeId = this.host.routeState.routeId;
     if (!agents || !routeId || agents.state.agentsList) {
-      return;
+      return Promise.resolve();
     }
     if (this.host.agentsListClient === snapshot.client && this.host.agentsListSource === agents) {
-      return;
+      return Promise.resolve();
     }
     this.host.agentsListClient = snapshot.client;
     this.host.agentsListSource = agents;
-    void agents.ensureList();
+    return agents.ensureList().then(() => undefined);
   }
 
   updateGatewaySessionKey(snapshot: {
@@ -372,20 +391,23 @@ export class ShellGatewayOwner {
     }
   }
 
-  private refreshProfileAppearancePrefs(context: ApplicationContext<RouteId>, force = false): void {
+  private refreshProfileAppearancePrefs(
+    context: ApplicationContext<RouteId>,
+    force = false,
+  ): Promise<void> {
     const snapshot = context.gateway.snapshot;
     const profileId = snapshot?.selfUser?.id;
     if (!profileId) {
-      return;
+      return Promise.resolve();
     }
     const client = snapshot.client;
     const configObject = context.runtimeConfig.state.configSnapshot?.config;
     if (snapshot.phase !== "connected" || !client || !configObject) {
-      return;
+      return Promise.resolve();
     }
     const previous = this.profileAppearanceSource;
     if (!force && previous?.client === client && previous.profileId === profileId) {
-      return;
+      return Promise.resolve();
     }
     const source = { client, profileId };
     this.profileAppearanceSource = source;
@@ -395,7 +417,7 @@ export class ShellGatewayOwner {
       context.gateway.snapshot.client === client &&
       context.gateway.snapshot.selfUser?.id === profileId &&
       this.profileAppearanceSource === source;
-    void refreshProfileAppearancePrefs({
+    return refreshProfileAppearancePrefs({
       client,
       profileId,
       configObject,
@@ -424,6 +446,7 @@ export class ShellGatewayOwner {
   }
 
   reset(): void {
+    (this.host.context?.connectionBootstrap ?? this.standaloneConnectionBootstrap).reset();
     void this.host.criticalNoticeRuntime?.then((runtime) => runtime.resetCriticalObserverTracker());
     this.host.agentsListClient = null;
     this.host.agentsListSource = null;

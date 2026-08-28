@@ -1,6 +1,7 @@
 // Application-owned browser push subscription lifecycle.
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import { formatUiError } from "../lib/format-error.ts";
+import type { ConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
 import type { ApplicationGateway } from "./gateway.ts";
 
 type WebPushSnapshot = {
@@ -30,7 +31,10 @@ function isWebPushSupported(): boolean {
   );
 }
 
-export function createWebPushCapability(gateway: ApplicationGateway): WebPushCapability {
+export function createWebPushCapability(
+  gateway: ApplicationGateway,
+  options: { connectionBootstrap?: ConnectionBootstrapCoordinator } = {},
+): WebPushCapability {
   const supported = isWebPushSupported();
   let snapshot: WebPushSnapshot = {
     supported,
@@ -67,6 +71,13 @@ export function createWebPushCapability(gateway: ApplicationGateway): WebPushCap
   const reconcile = async (client: GatewayBrowserClient) => {
     try {
       const subscription = await readExistingSubscription();
+      if (
+        disposed ||
+        gateway.snapshot.phase !== "connected" ||
+        gateway.snapshot.client !== client
+      ) {
+        return;
+      }
       const json = subscription?.toJSON();
       if (!json?.endpoint || !json.keys?.p256dh || !json.keys.auth) {
         return;
@@ -105,7 +116,10 @@ export function createWebPushCapability(gateway: ApplicationGateway): WebPushCap
     const client = gatewaySnapshot.client;
     const connected = gatewaySnapshot.phase === "connected" && client !== null;
     if (connected && !wasConnected && client) {
-      void reconcile(client);
+      void (
+        options.connectionBootstrap?.run("web-push-reconcile", () => reconcile(client)) ??
+        reconcile(client)
+      ).catch(() => undefined);
     }
     wasConnected = connected;
   });

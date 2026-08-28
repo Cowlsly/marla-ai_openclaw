@@ -16,7 +16,11 @@ import type {
   EmbeddedRunFailureSignal,
   TraceAttempt,
 } from "../types.js";
-import { hasAttemptTerminalState } from "./attempt-terminal-evidence.js";
+import { copyAttemptDeliveryState } from "./attempt-delivery-state.js";
+import {
+  hasAttemptTerminalState,
+  shouldContinueInteractiveAcceptedSessionSpawns,
+} from "./attempt-terminal-evidence.js";
 import {
   markEmbeddedRunAuthProfileSuccess,
   reportEmbeddedRunSuccessfulAuthBinding,
@@ -57,6 +61,8 @@ const COMPACTION_CONTINUATION_RETRY_INSTRUCTION =
   "The previous attempt compacted the conversation context before producing a final user-visible answer. Continue from the compacted transcript and produce the final answer now. Do not restart from scratch, do not repeat completed work, and do not rerun tools unless the transcript clearly lacks required evidence.";
 const BEFORE_AGENT_FINALIZE_RETRY_PROMPT_PREFIX =
   "Before accepting the previous final answer, apply this revision request and produce the revised final answer. Do not repeat completed work or rerun tools unless the request explicitly requires it.";
+const ACCEPTED_SESSION_SPAWN_CONTINUATION_TEXT =
+  "I’m continuing this work and will send the result when it is ready.";
 
 type TerminalPresentationObservation = {
   terminalPresentation?: string;
@@ -585,6 +591,10 @@ function completeEmbeddedRun(
   const replayInvalid = input.resolveReplayInvalid(null);
   const yieldHasContinuation =
     input.attempt.yieldDetected && hasYieldContinuationEvidence(input.attempt);
+  const acceptedSessionSpawnContinuation = shouldContinueInteractiveAcceptedSessionSpawns({
+    attempt: input.attempt,
+    run: input.runParams,
+  });
   const livenessState = input.attempt.yieldDetected
     ? "paused"
     : resolveRunLivenessState({
@@ -621,9 +631,11 @@ function completeEmbeddedRun(
       ? isTruncatedPartialReply
         ? [...input.payloadsForTerminalPath, { text: TRUNCATED_REPLY_NOTICE_TEXT }]
         : input.payloadsForTerminalPath
-      : input.attempt.yieldDetected && !yieldHasContinuation
-        ? [{ text: YIELD_DIAGNOSTIC_TEXT }]
-        : input.payloadsForTerminalPath;
+      : acceptedSessionSpawnContinuation
+        ? [{ text: ACCEPTED_SESSION_SPAWN_CONTINUATION_TEXT }]
+        : input.attempt.yieldDetected && !yieldHasContinuation
+          ? [{ text: YIELD_DIAGNOSTIC_TEXT }]
+          : input.payloadsForTerminalPath;
   input.setTerminalLifecycleMeta({
     replayInvalid,
     livenessState,
@@ -652,6 +664,7 @@ function completeEmbeddedRun(
         ...(input.attempt.yieldAcknowledgment
           ? { yieldAcknowledgment: input.attempt.yieldAcknowledgment }
           : {}),
+        ...(acceptedSessionSpawnContinuation ? { continuationPending: true as const } : {}),
         ...(input.emptyAssistantReplyIsSilent
           ? { terminalReplyKind: "silent-empty" as const }
           : {}),
@@ -708,22 +721,5 @@ function completeEmbeddedRun(
       },
       ...copyAttemptDeliveryState(input.attempt),
     },
-  };
-}
-
-export function copyAttemptDeliveryState(attempt: EmbeddedRunAttemptResult) {
-  return {
-    latestMcpAppChannelView: attempt.latestMcpAppChannelView,
-    latestMcpConnectAction: attempt.latestMcpConnectAction,
-    didSendViaMessagingTool: attempt.didSendViaMessagingTool,
-    didDeliverSourceReplyViaMessageTool: attempt.didDeliverSourceReplyViaMessageTool === true,
-    didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
-    messagingToolSentTexts: attempt.messagingToolSentTexts,
-    messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
-    messagingToolSentTargets: attempt.messagingToolSentTargets,
-    messagingToolSourceReplyPayloads: attempt.messagingToolSourceReplyPayloads,
-    heartbeatToolResponse: attempt.heartbeatToolResponse,
-    successfulCronAdds: attempt.successfulCronAdds,
-    acceptedSessionSpawns: attempt.acceptedSessionSpawns,
   };
 }

@@ -132,6 +132,23 @@ describe("installScheduledTask", () => {
     },
   );
 
+  it("routes generated Gateway tasks through the private Job Object supervisor", async () => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      const { scriptPath } = await installScheduledTask({
+        env,
+        stdout: new PassThrough(),
+        programArguments: ["node", "gateway.js"],
+        environment: { OPENCLAW_SERVICE_KIND: "gateway" },
+      });
+
+      const script = decodeWindowsLauncherScript({ buffer: await fs.readFile(scriptPath) });
+      expect(script).toContain("node gateway.js --task-supervisor < NUL");
+      await expect(readScheduledTaskCommand(env)).resolves.toMatchObject({
+        programArguments: ["node", "gateway.js"],
+      });
+    });
+  });
+
   it("writes version-free gateway and node descriptions", async () => {
     await withUserProfileDir(async (_tmpDir, env) => {
       const gateway = await installDefaultGatewayTask(env);
@@ -330,8 +347,10 @@ describe("installScheduledTask", () => {
       expect(schtasksCalls[1]?.slice(6)).toEqual(["/RU", "WORKSTATION\\alice", "/NP"]);
       expect(launcher).toContain("WScript.Shell");
       expect(launcher).toContain(scriptPath);
-      expect(launcher).toContain(`Run """${scriptPath}""", 0, False`);
-      expectTaskRunCall(2);
+      expect(launcher).toContain(
+        `WScript.Quit CreateObject("WScript.Shell").Run("""${scriptPath}""", 0, True)`,
+      );
+      expectTaskRunCall(3);
     });
   });
 
@@ -352,7 +371,7 @@ describe("installScheduledTask", () => {
       expect(scriptPath).toContain("苗振");
       expect(rawLauncher.subarray(0, 2)).toEqual(Buffer.from([0xff, 0xfe]));
       expect(rawLauncher.subarray(2).toString("utf16le")).toContain(
-        `Run """${scriptPath}""", 0, False`,
+        `WScript.Quit CreateObject("WScript.Shell").Run("""${scriptPath}""", 0, True)`,
       );
     });
   });
@@ -420,8 +439,10 @@ describe("installScheduledTask", () => {
       expect(captured?.xml).toContain("gateway.vbs</Command>");
       expect(script).toContain('set "OPENCLAW_WINDOWS_TASK_NAME=OpenClaw Custom Gateway"');
       expect(launcher).toContain("WScript.Shell");
-      expect(launcher).toContain(`Run """${scriptPath}""", 0, False`);
-      expectTaskRunCall(2, "OpenClaw Custom Gateway");
+      expect(launcher).toContain(
+        `WScript.Quit CreateObject("WScript.Shell").Run("""${scriptPath}""", 0, True)`,
+      );
+      expectTaskRunCall(3, "OpenClaw Custom Gateway");
     });
   });
 
@@ -487,6 +508,9 @@ describe("installScheduledTask", () => {
       const xml = captured?.xml ?? "";
       expect(xml).toContain("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>");
       expect(xml).toContain("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
+      expect(xml).toContain("<RestartOnFailure>");
+      expect(xml).toContain("<Interval>PT1M</Interval>");
+      expect(xml).toContain("<Count>3</Count>");
       // Preserve the prior CLI semantics: ONLOGON trigger, LeastPrivilege, exec action.
       expect(xml).toContain("<LogonTrigger>");
       expect(xml).toContain("<RunLevel>LeastPrivilege</RunLevel>");
@@ -544,7 +568,8 @@ describe("installScheduledTask", () => {
         "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
       );
       expect(upgradeXml).toContain("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
-      expectTaskRunCall(3);
+      expect(upgradeXml).toContain("<RestartOnFailure>");
+      expectTaskRunCall(4);
     });
   });
 
