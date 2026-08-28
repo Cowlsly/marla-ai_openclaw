@@ -117,6 +117,24 @@ describe("Matrix QA Lab scenario flows", () => {
     }
   });
 
+  it("leaves whole-flow deadlines unset for provider-budgeted scenarios", () => {
+    const providerBudgetedScenarioIds = new Set([
+      "matrix-e2ee-thread-follow-up",
+      "matrix-inbound-edit-no-duplicate-trigger",
+      "matrix-thread-nested-reply-shape",
+    ]);
+    const providerBudgetedScenarios = scenarios.filter((scenario) =>
+      providerBudgetedScenarioIds.has(scenario.id),
+    );
+
+    expect(providerBudgetedScenarios.map((scenario) => scenario.id).sort()).toEqual(
+      [...providerBudgetedScenarioIds].sort(),
+    );
+    for (const scenario of providerBudgetedScenarios) {
+      expect(scenario.execution.timeoutMs, scenario.id).toBeUndefined();
+    }
+  });
+
   it("applies the portable thread override through Matrix flow preparation", () => {
     expect(readQaScenarioById("thread-reply-override").execution).toMatchObject({
       kind: "flow",
