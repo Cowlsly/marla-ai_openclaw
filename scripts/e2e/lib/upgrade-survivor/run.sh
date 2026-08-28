@@ -89,6 +89,7 @@ status_seconds=""
 healthz_seconds=""
 readyz_seconds=""
 update_restart_seconds=""
+update_repair_required="0"
 migration_seconds=""
 idempotence_seconds=""
 run_completed="0"
@@ -99,6 +100,7 @@ UPDATE_ERR="$ARTIFACT_ROOT/update.err"
 POST_UPDATE_VALIDATE_JSON="$ARTIFACT_ROOT/post-update-validate.json"
 POST_UPDATE_VALIDATE_ERR="$ARTIFACT_ROOT/post-update-validate.err"
 DOCTOR_LOG="$ARTIFACT_ROOT/doctor.log"
+REPAIR_JSON="$ARTIFACT_ROOT/repair.json"
 BASELINE_DOCTOR_LOG="$ARTIFACT_ROOT/baseline-doctor.log"
 GATEWAY_LOG="$ARTIFACT_ROOT/gateway.log"
 HEALTHZ_JSON="$ARTIFACT_ROOT/healthz.json"
@@ -1353,29 +1355,6 @@ candidate_update_spec() {
   esac
 }
 
-assert_update_json_ok() {
-  local file="$1"
-  node -e '
-    const fs = require("node:fs");
-    const file = process.argv[1];
-    const raw = fs.readFileSync(file, "utf8");
-    let result;
-    try {
-      result = JSON.parse(raw);
-    } catch (err) {
-      // Published baselines may emit legacy service-control logs before the JSON payload.
-      const jsonStart = raw.indexOf("{");
-      if (jsonStart === -1) {
-        throw err;
-      }
-      result = JSON.parse(raw.slice(jsonStart));
-    }
-    if (!result || result.status !== "ok") {
-      throw new Error(`update JSON did not report ok status: ${JSON.stringify(result)}`);
-    }
-  ' "$file"
-}
-
 update_candidate() {
   local update_spec
   update_spec="$(candidate_update_spec)"
@@ -1399,8 +1378,24 @@ update_candidate() {
   fi
   local update_status=0
   openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" "${update_env[@]}" openclaw "${update_args[@]}" >"$UPDATE_JSON" 2>"$UPDATE_ERR" || update_status=$?
-  if [ "$update_status" -ne 0 ]; then
-    echo "openclaw update failed" >&2
+  if [ "$update_status" -eq 0 ]; then
+    node scripts/e2e/lib/upgrade-survivor/assertions.mjs \
+      assert-successful-update-json "$UPDATE_JSON" "$candidate_version"
+    # This tagged baseline predates capability consent and owns the recovery regression proof.
+    # Newer/dynamic baselines may already have consent and legitimately update without repair.
+    if [ "$baseline_version" = "2026.7.1-2" ]; then
+      echo "baseline $baseline_spec unexpectedly skipped capability-consent recovery" >&2
+      return 1
+    fi
+    if [ "$UPDATE_RESTART_MODE" = "auto-auth" ]; then
+      update_end="$(node -e "process.stdout.write(String(Date.now()))")"
+      update_restart_seconds=$(((update_end - update_start + 999) / 1000))
+    fi
+  elif node scripts/e2e/lib/upgrade-survivor/assertions.mjs \
+    assert-recoverable-update-json "$UPDATE_JSON" "$candidate_version"; then
+    update_repair_required="1"
+  else
+    echo "openclaw update failed before the recoverable post-core boundary" >&2
     local validate_status=0
     openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" openclaw config validate --json >"$POST_UPDATE_VALIDATE_JSON" 2>"$POST_UPDATE_VALIDATE_ERR" || validate_status=$?
     echo "post-update config validation probe status=$validate_status" >&2
@@ -1410,12 +1405,11 @@ update_candidate() {
     openclaw_e2e_print_log "$UPDATE_JSON" >&2 || true
     return "$update_status"
   fi
-  if [ "$UPDATE_RESTART_MODE" = "auto-auth" ]; then
-    update_end="$(node -e "process.stdout.write(String(Date.now()))")"
-    update_restart_seconds=$(((update_end - update_start + 999) / 1000))
-    assert_update_json_ok "$UPDATE_JSON"
-  fi
   installed_version="$(read_installed_version)"
+  if [ "$installed_version" != "$candidate_version" ]; then
+    echo "update did not leave the candidate installed: $installed_version" >&2
+    return 1
+  fi
 }
 
 assert_root_managed_vps_cli_usable() {
@@ -1432,10 +1426,26 @@ assert_root_managed_vps_cli_usable() {
   openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" "${root_cli_env[@]}" openclaw plugins >"$ARTIFACT_ROOT/root-vps-plugins.out" 2>"$ARTIFACT_ROOT/root-vps-plugins.err"
 }
 
-run_doctor() {
-  local started_at budget
+run_post_update_repair() {
+  local started_at budget restart_start restart_end
   started_at="$(date +%s)"
-  if ! openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" openclaw doctor --fix --non-interactive >"$DOCTOR_LOG" 2>&1; then
+  if [ "$update_repair_required" = "1" ]; then
+    if ! openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" openclaw update repair \
+      --accept-capabilities --yes --no-restart --json >"$REPAIR_JSON" 2>"$DOCTOR_LOG"; then
+      echo "openclaw update repair failed" >&2
+      openclaw_e2e_print_log "$DOCTOR_LOG" >&2
+      openclaw_e2e_print_log "$REPAIR_JSON" >&2
+      return 1
+    fi
+    node scripts/e2e/lib/upgrade-survivor/assertions.mjs assert-repair-json "$REPAIR_JSON"
+    if [ "$UPDATE_RESTART_MODE" = "auto-auth" ]; then
+      restart_start="$(node -e "process.stdout.write(String(Date.now()))")"
+      openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" \
+        systemctl --user restart openclaw-gateway.service
+      restart_end="$(node -e "process.stdout.write(String(Date.now()))")"
+      update_restart_seconds=$(((restart_end - restart_start + 999) / 1000))
+    fi
+  elif ! openclaw_e2e_maybe_timeout "$COMMAND_TIMEOUT" openclaw doctor --fix --non-interactive >"$DOCTOR_LOG" 2>&1; then
     echo "openclaw doctor failed" >&2
     openclaw_e2e_print_log "$DOCTOR_LOG" >&2
     return 1
@@ -1641,7 +1651,7 @@ if [ -n "${OPENCLAW_CLAWHUB_URL:-}" ]; then
 fi
 phase root-managed-vps-cli-usable assert_root_managed_vps_cli_usable
 phase assert-legacy-plugin-dependency-debris-before-doctor assert_legacy_plugin_dependency_debris_before_doctor
-phase doctor run_doctor
+phase post-update-repair run_post_update_repair
 phase assert-legacy-plugin-dependency-debris-cleaned assert_legacy_plugin_dependency_debris_cleaned
 phase assert-legacy-runtime-deps-symlink-repaired assert_legacy_runtime_deps_symlink_repaired
 phase validate-post-doctor-config validate_post_doctor_config
