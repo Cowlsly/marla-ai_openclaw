@@ -4,8 +4,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withTempHome } from "../../config/home-env.test-harness.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { resolveRegistryUpdateChannel } from "../../infra/update-channels.js";
+import { resolveNpmInstallSpecsForUpdateChannel } from "../../plugins/install-channel-specs.js";
 import { invokePluginArtifactInstallMock } from "../../plugins/test-helpers/install-fixtures.js";
 import { expectObjectFields, mockFirstObjectArg } from "../../test-utils/mock-call-assertions.js";
+import { VERSION } from "../../version.js";
 import { createCommandWorkspaceHarness } from "./commands-filesystem.test-support.js";
 import { handlePluginsCommand } from "./commands-plugins.js";
 import { buildPluginsCommandParams } from "./commands.test-harness.js";
@@ -61,6 +64,13 @@ vi.mock("../../plugins/install-persistence.js", async (importOriginal) => ({
 }));
 
 const workspaceHarness = createCommandWorkspaceHarness("openclaw-command-plugins-install-");
+
+function expectedNpmInstallSpec(spec: string): string {
+  return resolveNpmInstallSpecsForUpdateChannel({
+    spec,
+    updateChannel: resolveRegistryUpdateChannel({ currentVersion: VERSION }),
+  }).installSpec;
+}
 
 function buildPluginsParams(
   commandBodyNormalized: string,
@@ -267,7 +277,7 @@ describe("handleCommands /plugins install", () => {
 
       expect(result?.reply?.text).toContain('Installed plugin "brave"');
       expectObjectFields(mockFirstObjectArg(installPluginFromNpmSpecMock), {
-        spec: "@openclaw/brave-plugin",
+        spec: expectedNpmInstallSpec("@openclaw/brave-plugin"),
         config: {
           ...policyConfig,
           agents: { entries: { main: {} } },
@@ -310,7 +320,7 @@ describe("handleCommands /plugins install", () => {
 
       expect(result?.reply?.text).toContain('Installed plugin "discord"');
       expectObjectFields(mockFirstObjectArg(installPluginFromNpmSpecMock), {
-        spec: "@openclaw/discord",
+        spec: expectedNpmInstallSpec("@openclaw/discord"),
         expectedPluginId: "discord",
         trustedSourceLinkedOfficialInstall: true,
       });
@@ -1070,7 +1080,7 @@ describe("handleCommands /plugins install", () => {
       }
       expect(result.reply?.text).toContain('Installed plugin "wecom-openclaw-plugin"');
       expectObjectFields(mockFirstObjectArg(installPluginFromNpmSpecMock), {
-        spec: "@wecom/wecom-openclaw-plugin@latest",
+        spec: expectedNpmInstallSpec("@wecom/wecom-openclaw-plugin@latest"),
         expectedPluginId: "wecom-openclaw-plugin",
         expectedIntegrity: undefined,
         trustedSourceLinkedOfficialInstall: true,

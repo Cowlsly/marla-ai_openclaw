@@ -1015,7 +1015,7 @@ describe("ensureOnboardingPluginInstalled", () => {
       OpenClawConfig,
       PluginInstallRecord,
     ];
-    expect(recordUpdate.spec).toBe("@openclaw/codex");
+    expect(recordUpdate.spec).toBe(expectedNpmInstallSpec("@openclaw/codex"));
   });
 
   it("logs npm install warnings once while shortening the progress label", async () => {
