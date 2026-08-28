@@ -219,7 +219,6 @@ type SummaryQualityRetention = {
   auditSummary?: string;
   identifiers: string[];
   latestAsk: string | null;
-  latestAskCompleted: boolean;
   requiredAskContext: string;
   identifierPolicy: "strict" | "off" | "custom";
 };
@@ -1211,7 +1210,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
 
       const oracleMessages = [...messagesToSummarize, ...turnPrefixMessages];
       const latestUserAsk = extractLatestUserAsk(oracleMessages);
-      const latestUserAskCompleted = preparation.splitTurnCompleted ?? false;
       const identifiers = extractOpaqueIdentifiers(
         oracleMessages.slice(-10).map(extractMessageText).filter(Boolean).join("\n"),
       );
@@ -1323,7 +1321,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
                 auditSummary: unbudgetedSummary,
                 identifiers,
                 latestAsk: latestUserAsk,
-                latestAskCompleted: latestUserAskCompleted,
                 requiredAskContext,
                 identifierPolicy,
               }
@@ -1353,7 +1350,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           sourceSummaries: [historySummary, splitTurnSummaryLocal].filter(Boolean),
           identifiers,
           latestAsk: latestUserAsk,
-          latestAskCompleted: latestUserAskCompleted,
           identifierPolicy,
         });
         if (quality.ok) {
