@@ -137,6 +137,20 @@ export function resolveWorkerLeaseTransportError(
   return undefined;
 }
 
+export function requireWorkerAllocation(
+  value: unknown,
+): Awaited<ReturnType<WorkerProvider["resolveAllocation"]>> {
+  if (
+    !isRecord(value) ||
+    typeof value.leaseId !== "string" ||
+    !value.leaseId.trim() ||
+    typeof value.sharedHost !== "boolean"
+  ) {
+    throw new Error("Worker provider returned an invalid allocation identity");
+  }
+  return { leaseId: value.leaseId.trim(), sharedHost: value.sharedHost };
+}
+
 export function requireWorkerLease(value: unknown): WorkerLease {
   const hasSsh = isRecord(value) && Object.hasOwn(value, "ssh");
   const hasNode = isRecord(value) && Object.hasOwn(value, "node");

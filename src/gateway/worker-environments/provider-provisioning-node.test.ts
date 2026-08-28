@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { bindCloudWorkerSetupCompletion } from "../../infra/device-pairing-cloud-worker.js";
 import type { WorkerProvider } from "../../plugins/types.js";
 import { admitWorkerConnection } from "./admission.js";
 import { hashWorkerCredential } from "./credential.js";
@@ -76,7 +77,7 @@ describe("node worker provider provisioning", () => {
     );
   });
 
-  it("destroys a replayed node lease without installing or admitting its worker", async () => {
+  it("destroys an unreported node allocation without reenrolling or admitting its worker", async () => {
     const leaseId = "cloud-lease-destroy-replay";
     const deviceId = "cloud-device-destroy-replay";
     const operationIds: string[] = [];
@@ -105,10 +106,18 @@ describe("node worker provider provisioning", () => {
         supportedExecutionModes: ["worker-turn"],
         provisionBeforeInstallation: true,
         requiresNodeEnrollment: true,
+        resolveAllocation: async () => ({ leaseId, sharedHost: false }),
         provision: async (_profile, operationId, options) => {
           operationIds.push(operationId);
           if (operationIds.length === 1) {
-            await options?.beginNodeEnrollment?.();
+            const enrollment = await options?.beginNodeEnrollment?.();
+            if (enrollment?.mode !== "connect") {
+              throw new Error("expected pending enrollment");
+            }
+            bindCloudWorkerSetupCompletion({
+              db: support.testState.stateDb.db,
+              completion: { setupId: enrollment.setupId, deviceId, completedAtMs: 1_000 },
+            });
             throw new Error("provider response was lost after node allocation");
           }
           return {
@@ -143,13 +152,11 @@ describe("node worker provider provisioning", () => {
       leaseId,
       nodeDeviceId: deviceId,
       sharedHost: false,
-      desktop: support.DESKTOP,
+      desktop: null,
     });
 
-    expect(operationIds).toEqual([
-      provisioning.provisionOperationId,
-      provisioning.provisionOperationId,
-    ]);
+    expect(operationIds).toEqual([provisioning.provisionOperationId]);
+    expect(prepareNodeEnrollment).toHaveBeenCalledOnce();
     expect(ensureNodeWorkerBundle).not.toHaveBeenCalled();
     expect(support.testState.prepareInstallation).not.toHaveBeenCalled();
     expect(support.testState.bootstrapWorker).not.toHaveBeenCalled();
@@ -164,7 +171,7 @@ describe("node worker provider provisioning", () => {
         nodeSetupId: provisioning.nodeSetupId,
         nodeDeviceId: deviceId,
         sharedHost: false,
-        desktop: support.DESKTOP,
+        desktop: null,
         bootstrapReceipt: null,
         ownerEpoch: 0,
       }),

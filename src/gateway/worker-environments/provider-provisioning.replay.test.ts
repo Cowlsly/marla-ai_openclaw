@@ -506,7 +506,7 @@ describe("worker environment service provision replay", () => {
     expect(provision).not.toHaveBeenCalled();
   });
 
-  it("serializes destroy and provision replay behind a timed-out provider operation", async () => {
+  it("serializes allocation resolution and destroy behind a timed-out provider operation", async () => {
     const events: string[] = [];
     const operationIds: string[] = [];
     let active = 0;
@@ -524,6 +524,11 @@ describe("worker environment service provision replay", () => {
       events.push("destroy:end");
     });
     const provider = support.createProvider({
+      resolveAllocation: async () => {
+        events.push("resolve");
+        expect(active).toBe(0);
+        return { leaseId: "lease-timeout-replay", sharedHost: false };
+      },
       provision: async (_profile, operationId) => {
         originalProvisionCalls += 1;
         const call = originalProvisionCalls;
@@ -572,14 +577,13 @@ describe("worker environment service provision replay", () => {
 
     await teardownResult;
     const finalEnvironmentId = expectDefined(environmentId, "timed-out provision environment id");
-    expect(operationIds).toHaveLength(2);
+    expect(operationIds).toHaveLength(1);
     expect(new Set(operationIds).size).toBe(1);
     expect(maxActive).toBe(1);
     expect(events).toEqual([
       "provision:1:start",
       "provision:1:end",
-      "provision:2:start",
-      "provision:2:end",
+      "resolve",
       "destroy:start",
       "destroy:end",
     ]);

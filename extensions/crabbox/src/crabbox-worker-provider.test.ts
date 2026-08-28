@@ -171,6 +171,61 @@ function hasLoneSurrogate(value: string): boolean {
 }
 
 describe("Crabbox worker provider", () => {
+  it.each(["aws", "hetzner", "machine0"])(
+    "resolves %s cleanup without commands or setup environment resolution",
+    async (backend) => {
+      vi.stubEnv("OPENCLAW_TEST_MISSING_SETUP", undefined);
+      const runCommand = vi.fn<CrabboxCommandRunner>();
+      const provider = providerWithRawRunner(runCommand);
+      await expect(
+        provider.resolveAllocation(
+          {
+            ...PROFILE,
+            provider: backend,
+            setup: "true",
+            setupEnv: ["OPENCLAW_TEST_MISSING_SETUP"],
+          },
+          OPERATION_ID,
+        ),
+      ).resolves.toEqual({ leaseId: LEASE_ID, sharedHost: false });
+      expect(runCommand).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    "cleans the fixed operation after lost warmup (allocated: %s) without replay",
+    async (allocated) => {
+      let live = false;
+      const calls: string[][] = [];
+      const beginNodeEnrollment = vi.fn();
+      const provider = providerWithRunner(async (argv) => {
+        calls.push(argv);
+        if (argv[1] === "warmup") {
+          live = allocated;
+          return commandResult({
+            code: 5,
+            stderr: allocated ? "response lost" : "preflight failed",
+          });
+        }
+        if (argv[1] === "stop") {
+          live = false;
+          return commandResult();
+        }
+        throw new Error(`unexpected cleanup command ${argv[1]}`);
+      });
+      await expect(
+        provider.provision(PROFILE, OPERATION_ID, { beginNodeEnrollment }),
+      ).rejects.toThrow();
+      const allocation = await provider.resolveAllocation(PROFILE, OPERATION_ID);
+      await provider.destroy({ leaseId: allocation.leaseId, profile: PROFILE });
+      expect(allocation).toEqual({ leaseId: LEASE_ID, sharedHost: false });
+      expect(calls.map((argv) => argv[1])).toEqual(["warmup", "stop"]);
+      expect(calls.at(-1)).toEqual([SIBLING_BINARY, "stop", "--provider", "aws", "--id", LEASE_ID]);
+      expect(beginNodeEnrollment).not.toHaveBeenCalled();
+      expect(live).toBe(false);
+    },
+  );
+
   it("reads large machine catalogs while preserving shapes, order, and configured defaults", async () => {
     const calls: string[][] = [];
     const provider = providerWithRunner(async (argv, options) => {

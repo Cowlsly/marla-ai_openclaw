@@ -26,6 +26,7 @@ const GO_DURATION_PATTERN = /^\+?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s
 const GO_DURATION_TOKEN_PATTERN = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/gu;
 const MAX_GO_DURATION_NANOSECONDS = 9_223_372_036_854_775_807n;
 const CRABBOX_LEASE_ID_DOMAIN = "openclaw:crabbox-worker-lease-id:v1\0";
+const LEGACY_PROVISION_OPERATION_ID_PATTERN = /^provision:[a-f0-9]{64}$/u;
 const DURATION_UNIT_NANOSECONDS: Readonly<Record<string, bigint>> = {
   h: 3_600_000_000_000n,
   m: 60_000_000_000n,
@@ -410,6 +411,14 @@ export function operationSlug(operationId: string): string {
 }
 
 export function operationLeaseId(operationId: string): string {
+  if (!operationId.trim()) {
+    throw new Error("Crabbox provision requires an operation id");
+  }
+  if (LEGACY_PROVISION_OPERATION_ID_PATTERN.test(operationId)) {
+    throw new WorkerProviderError(
+      "Legacy Crabbox provision state cannot be replayed safely; clean up any prior lease and dispatch again",
+    );
+  }
   return `cbx_${createHash("sha256")
     .update(CRABBOX_LEASE_ID_DOMAIN)
     .update(operationId)

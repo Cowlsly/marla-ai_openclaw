@@ -76,7 +76,6 @@ const DESTROYED_STATES = new Set([
 ]);
 const UNUSABLE_PROVISION_STATES = new Set([...DESTROYED_STATES, "deleting", "failed"]);
 const LEASE_ID_PATTERN = /^(?:cbx_|tbx_)[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
-const LEGACY_PROVISION_OPERATION_ID_PATTERN = /^provision:[a-f0-9]{64}$/u;
 
 type CrabboxProfile = ReturnType<typeof parseCrabboxProfile>;
 
@@ -501,6 +500,11 @@ export function createCrabboxWorkerProvider(
     };
   };
 
+  const resolveAllocation: WorkerProvider["resolveAllocation"] = async (_profile, operationId) => ({
+    leaseId: operationLeaseId(operationId),
+    sharedHost: false,
+  });
+
   return {
     id: CRABBOX_WORKER_PROVIDER_ID,
     dispose: () => heartbeats.dispose(),
@@ -508,6 +512,7 @@ export function createCrabboxWorkerProvider(
     supportedExecutionModes: ["worker-turn", "remote-exec"],
     provisionBeforeInstallation: true,
     requiresNodeEnrollment: true,
+    resolveAllocation,
     resolveProvisionTimeoutMs(profile) {
       return resolveCrabboxProvisionCallTimeoutMs(parseCrabboxProfile(profile));
     },
@@ -536,17 +541,10 @@ export function createCrabboxWorkerProvider(
         deadline +
         countCrabboxProvisionSetupPhases(parsed) * CRABBOX_SETUP_TIMEOUT_MS +
         CRABBOX_NODE_ENROLLMENT_TIMEOUT_MS;
-      if (!operationId.trim()) {
-        throw new Error("Crabbox provision requires an operation id");
-      }
-      if (LEGACY_PROVISION_OPERATION_ID_PATTERN.test(operationId)) {
-        throw new WorkerProviderError(
-          "Legacy Crabbox provision state cannot be replayed safely; clean up any prior lease and dispatch again",
-        );
-      }
+      const allocation = await resolveAllocation(profile, operationId);
       const binary = resolveBinary(parsed.binary);
       const context = { binary, provider: parsed.provider };
-      const leaseId = operationLeaseId(operationId);
+      const leaseId = allocation.leaseId;
       const slug = operationSlug(operationId);
       if (parsed.desktop && parsed.provider === "hetzner") {
         await assertHetznerDesktopHasManagedCoordinator({ binary, runCommand });
@@ -693,9 +691,8 @@ export function createCrabboxWorkerProvider(
         provider: parsed.provider,
       });
       return {
-        leaseId,
+        ...allocation,
         node: { deviceId },
-        sharedHost: false,
         ...(parsed.desktop ? { desktop: createCrabboxWorkerDesktopEndpoint() } : {}),
       };
     },
