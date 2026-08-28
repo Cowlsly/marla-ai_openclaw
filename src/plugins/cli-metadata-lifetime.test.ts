@@ -29,7 +29,7 @@ import {
 } from "./loader.test-fixtures.js";
 import { loadPluginManifestRegistryCore } from "./manifest-registry.js";
 import { clearPluginMetadataLifecycleCaches } from "./plugin-metadata-lifecycle.js";
-import { resolvePluginRuntimeLoadContext } from "./runtime/load-context.js";
+import { resolvePluginRuntimeLoadContext } from "./runtime/load-context.resolve.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
