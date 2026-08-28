@@ -247,6 +247,38 @@ describe("createFollowupRunner", () => {
     expect(turn.operation.fail).toHaveBeenCalledWith("run_failed", failure);
   });
 
+  it("renders post-compaction failures for queued delivery", async () => {
+    const typing = createTypingController();
+    const turn = createTurn();
+    Object.assign(turn.operation, {
+      postCompactionOutcome: { kind: "later_model_failed", count: 1 },
+    });
+    state.admit.mockResolvedValue({ kind: "admitted", turn });
+    state.execute.mockResolvedValue(createRejectedExecution());
+    state.account.mockResolvedValue(undefined);
+    state.resolveDecision.mockReturnValue({
+      kind: "deliver",
+      payloads: [{ text: "⚠️ Provider billing failed.", isError: true }],
+    });
+
+    await createFollowupRunner({ typing, typingMode: "instant", defaultModel: "claude" })(
+      turn.queued,
+    );
+
+    expect(state.deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          payloads: [
+            expect.objectContaining({
+              text: "⚠️ Context compaction succeeded, but the later model request still failed. Provider billing failed.",
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(turn.operation.postCompactionOutcome).toMatchObject({ kind: "later_model_failed" });
+  });
+
   it("holds the reply operation through progress drain, accounting, and delivery", async () => {
     const order: string[] = [];
     const typing = createTypingController();

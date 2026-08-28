@@ -5,6 +5,7 @@ import { loadSessionEntry, updateSessionEntry } from "../../config/sessions/sess
 import { logVerbose } from "../../globals.js";
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
 import { hasOutboundReplyContent } from "../../plugin-sdk/reply-payload.js";
+import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { markReplyPayloadForSourceSuppressionDelivery } from "../reply-payload.js";
 import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
@@ -21,6 +22,7 @@ import {
   createReplyAgentRestartRecoveryController,
   executePreparedReplyAgentRun,
 } from "./agent-runner-execute.js";
+import { renderPostCompactionFailurePayloads } from "./agent-runner-failure-reply.js";
 import {
   createShouldEmitToolOutput,
   createShouldEmitToolResult,
@@ -561,7 +563,7 @@ export async function runReplyAgent(
       cleanupTranscripts: true,
     });
   try {
-    return await executePreparedReplyAgentRun({
+    const result = await executePreparedReplyAgentRun({
       activeSessionStore,
       admitUserTurn,
       applyReplyToMode,
@@ -616,6 +618,19 @@ export async function runReplyAgent(
       typingMode,
       typingSignals,
     });
+    if (
+      isHeartbeat ||
+      isInternalMessageChannel(
+        followupRun.run.messageProvider ?? sessionCtx.Surface ?? sessionCtx.Provider,
+      )
+    ) {
+      return result;
+    }
+    const rendered = renderPostCompactionFailurePayloads(
+      replyOperation,
+      Array.isArray(result) ? result : result ? [result] : [],
+    );
+    return Array.isArray(result) ? rendered : rendered[0];
   } catch (error) {
     recordReplyOperationAgentTurn(
       replyOperationRunState,

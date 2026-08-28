@@ -15,7 +15,10 @@ import { defaultRuntime } from "../../runtime.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import { buildContextOverflowRecoveryText } from "./agent-runner-context-recovery.js";
 import { resolveSourceReplyPolicy } from "./agent-runner-core.js";
-import { markAgentRunFailureReplyPayload } from "./agent-runner-failure-reply.js";
+import {
+  markAgentRunFailureReplyPayload,
+  markPostCompactionModelFailure,
+} from "./agent-runner-failure-reply.js";
 import type { AgentFallbackCandidatesResult } from "./agent-runner-fallback-candidate.js";
 import type {
   AgentFallbackCycleParams,
@@ -103,6 +106,7 @@ export async function settleAgentFallbackCycle(params: {
     defaultRuntime.error(
       `Auto-compaction failed (${embeddedError.message}). Preserving existing session mapping for ${turn.sessionKey ?? turn.followupRun.run.sessionId}.`,
     );
+    markPostCompactionModelFailure(turn.replyOperation);
     turn.replyOperation?.fail("run_failed", embeddedError);
     return {
       kind: "final",
@@ -122,6 +126,7 @@ export async function settleAgentFallbackCycle(params: {
   }
   if (embeddedError?.kind === "role_ordering") {
     emitSettledLifecycleError(new Error(terminalErrorMessage ?? "Agent run failed"));
+    markPostCompactionModelFailure(turn.replyOperation);
     turn.replyOperation?.fail("run_failed", embeddedError);
     const embeddedErrorText = formatErrorMessage(embeddedError);
     return {
@@ -189,6 +194,9 @@ export async function settleAgentFallbackCycle(params: {
         ? { ...terminalMetadata, terminalReply: privateFinalTerminalReply }
         : terminalMetadata,
     );
+  }
+  if (terminalRunFailed) {
+    markPostCompactionModelFailure(turn.replyOperation);
   }
   return {
     kind: "completed",

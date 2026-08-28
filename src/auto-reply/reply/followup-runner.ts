@@ -3,6 +3,8 @@ import { hasCompletedSourceReplyDeliveryEvidence } from "../../agents/embedded-a
 import { clearAgentRunContext } from "../../infra/agent-run-registry.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { defaultRuntime } from "../../runtime.js";
+import { isInternalMessageChannel } from "../../utils/message-channel.js";
+import { renderPostCompactionFailurePayloads } from "./agent-runner-failure-reply.js";
 import { accountFollowupTurn } from "./agent-runner-result-accounting.js";
 import { deliverFollowupDecision, resolveFollowupDeliveryDecision } from "./followup-delivery.js";
 import {
@@ -128,6 +130,17 @@ export function createFollowupRunner(
         accounting,
         opts: deliveryOpts,
       });
+      if (decision.kind === "deliver") {
+        decision.payloads = renderPostCompactionFailurePayloads(
+          defaults.opts?.isHeartbeat === true ||
+            isInternalMessageChannel(
+              turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
+            )
+            ? undefined
+            : turn.operation,
+          decision.payloads,
+        );
+      }
       await deliverFollowupDecision({
         decision,
         turn,

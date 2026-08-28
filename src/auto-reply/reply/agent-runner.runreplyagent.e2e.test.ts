@@ -16,6 +16,7 @@ import {
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { buildCurrentRunRestartRecoveryClaim } from "../../agents/agent-command-restart-recovery.js";
 import {
+  BILLING_ERROR_USER_MESSAGE,
   GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
   HEARTBEAT_EXTERNAL_RUN_FAILURE_TEXT,
 } from "../../agents/failover/user-copy.js";
@@ -84,6 +85,7 @@ type AgentRunParams = {
   shouldEmitToolResult?: () => boolean;
   shouldEmitToolOutput?: () => boolean;
   onAgentEvent?: (evt: { stream: string; data: Record<string, unknown> }) => void;
+  onAutoCompaction?: (outcome: { kind: "succeeded"; count: number }) => void;
   silentExpected?: boolean;
   trigger?: string;
   bootstrapContextRunKind?: string;
@@ -266,6 +268,7 @@ vi.mock("../../channels/plugins/index.js", async (importOriginal) => ({
 }));
 
 vi.mock("../../agents/embedded-agent-runner/runs.js", () => ({
+  clearActiveEmbeddedRun: () => undefined,
   formatEmbeddedAgentQueueFailureSummary: () => "test queue rejection",
   queueEmbeddedAgentMessageWithOutcomeAsync: async (
     sessionId: string,
@@ -1368,6 +1371,103 @@ describe("runReplyAgent MCP App channel action", () => {
       sessionKey: "main",
       view: { viewId: "view-latest" },
     });
+  });
+});
+
+describe("runReplyAgent post-compaction failure", () => {
+  it("keeps successful compaction visible after retry and fallback failure", async () => {
+    state.runEmbeddedAgentMock
+      .mockImplementationOnce(async (params: AgentRunParams) => {
+        if (!params.onAutoCompaction) {
+          throw new Error("expected auto-compaction outcome observer");
+        }
+        params.onAutoCompaction({ kind: "succeeded", count: 1 });
+        throw new Error("LLM request timed out.");
+      })
+      .mockResolvedValueOnce({
+        payloads: [{ text: BILLING_ERROR_USER_MESSAGE, isError: true }],
+        meta: { error: { kind: "billing", message: "billing unavailable" } },
+      });
+    vi.spyOn(modelFallbackModule, "runWithModelFallback").mockImplementationOnce(async (args) => {
+      await runInitialModelFallbackAttempt(args).catch(() => undefined);
+      return {
+        outcome: "exhausted" as const,
+        result: await runFallbackModelAttempt(args, "anthropic", "claude-sonnet-4-6", "billing"),
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        attempts: [
+          {
+            provider: "openai",
+            model: "gpt-5.6-luna",
+            error: "LLM request timed out.",
+            reason: "timeout" as const,
+          },
+          {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            error: "billing unavailable",
+            reason: "billing" as const,
+          },
+        ],
+      };
+    });
+
+    const replyOperation = createReplyOperation({
+      sessionKey: "main",
+      sessionId: "session",
+      resetTriggered: false,
+    });
+    const { run } = createMinimalRun({ replyOperation });
+    const result = await run();
+    const payload = Array.isArray(result) ? result[0] : result;
+
+    expect(replyOperation.postCompactionOutcome).toEqual({
+      kind: "later_model_failed",
+      count: 1,
+    });
+    expect(replyOperation.result).toMatchObject({ kind: "failed" });
+    expect(payload?.text).toBe(
+      `⚠️ Context compaction succeeded, but the later model request still failed. ${BILLING_ERROR_USER_MESSAGE.replace(/^⚠️\s*/u, "")}`,
+    );
+  });
+
+  it("does not call a later persistence failure a model failure", async () => {
+    const accounting = await import("./session-run-accounting.js");
+    const persistSpy = vi
+      .spyOn(accounting, "persistRunSessionUsage")
+      .mockRejectedValueOnce(new Error("persist exploded"));
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: AgentRunParams) => {
+      if (!params.onAutoCompaction) {
+        throw new Error("expected auto-compaction outcome observer");
+      }
+      params.onAutoCompaction({ kind: "succeeded", count: 1 });
+      await params.onPartialReply?.({ text: "partial answer" });
+      return {
+        payloads: [{ text: "final answer" }],
+        meta: { agentMeta: { usage: { input: 1, output: 1 } } },
+      };
+    });
+
+    try {
+      const replyOperation = createReplyOperation({
+        sessionKey: "main",
+        sessionId: "session",
+        resetTriggered: false,
+      });
+      const { run } = createMinimalRun({
+        blockStreamingEnabled: false,
+        replyOperation,
+        opts: { onPartialReply: vi.fn(async () => undefined) },
+      });
+      const result = await run();
+      const payload = Array.isArray(result) ? result[0] : result;
+
+      expect(payload?.text).toBe(GENERIC_EXTERNAL_RUN_FAILURE_TEXT);
+      expect(payload?.text).not.toContain("Context compaction succeeded");
+      expect(replyOperation.postCompactionOutcome).toEqual({ kind: "succeeded", count: 1 });
+    } finally {
+      persistSpy.mockRestore();
+    }
   });
 });
 

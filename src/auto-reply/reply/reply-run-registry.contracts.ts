@@ -211,7 +211,13 @@ type ReplyOperationResult =
   | { kind: "failed"; code: ReplyOperationFailureCode; cause?: unknown }
   | { kind: "aborted"; code: ReplyOperationAbortCode };
 
+export type PostCompactionOutcome =
+  | { kind: "succeeded"; count: number }
+  | { kind: "later_model_failed"; count: number };
+
 export type ReplyOperation = {
+  /** Recovery owner fact; only model-terminal owners may promote it to failure. */
+  postCompactionOutcome?: PostCompactionOutcome;
   readonly key: ReplyRunKey;
   readonly sessionId: string;
   readonly turnKind: ReplyTurnKind;

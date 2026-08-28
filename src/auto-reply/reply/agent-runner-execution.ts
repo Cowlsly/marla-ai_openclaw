@@ -65,6 +65,7 @@ import type {
 import {
   buildTerminalAgentRunFailureReplyPayload,
   markAgentRunFailureReplyPayload,
+  markPostCompactionModelFailure,
   resolveExternalRunFailureTextForConversation,
 } from "./agent-runner-failure-reply.js";
 import {
@@ -432,6 +433,7 @@ async function executeAgentTurnInternalWithRetryState(
   if (finalEmbeddedError && !hasPayloadText) {
     const errorMsg = finalEmbeddedError.message ?? "";
     if (isContextOverflowError(errorMsg)) {
+      markPostCompactionModelFailure(params.replyOperation);
       params.replyOperation?.fail("run_failed", finalEmbeddedError);
       return {
         kind: "final",

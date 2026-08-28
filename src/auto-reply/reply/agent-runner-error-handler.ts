@@ -36,6 +36,7 @@ import {
   isNonDirectConversationContext,
   isVerboseFailureDetailEnabled,
   markAgentRunFailureReplyPayload,
+  markPostCompactionModelFailure,
   resolveExternalRunFailureTextForConversation,
   resolveReplyFailoverFacts,
 } from "./agent-runner-failure-reply.js";
@@ -48,12 +49,6 @@ import {
   resolveReplyOperationTerminationFields,
   resolveRestartLifecycleError,
 } from "./reply-operation-abort.js";
-
-function renderPostCompactionFailureText(text: string, compactionCount: number): string {
-  return compactionCount > 0
-    ? `⚠️ Context compaction succeeded, but the later model request still failed. ${text.replace(/^⚠️\s*/u, "")}`
-    : text;
-}
 
 const MAX_LIVE_SWITCH_RETRIES = 2;
 const TRANSIENT_HTTP_RETRY_DELAY_MS = 2_500;
@@ -238,8 +233,6 @@ export async function handleAgentExecutionError(params: {
   const isTransientHttp =
     isTransientHttpError(message) ||
     (isFailoverError(err) && (err.reason === "timeout" || err.reason === "server_error"));
-  const visibleCompactionCount =
-    turn.isHeartbeat || params.shouldSurfaceToControlUi ? 0 : params.state.autoCompactionCount;
 
   const replyOperationAbortAction = resolveReplyOperationAbortAction(err);
   if (replyOperationAbortAction) {
@@ -504,15 +497,13 @@ export async function handleAgentExecutionError(params: {
                 ? HEARTBEAT_EXTERNAL_RUN_FAILURE_TEXT
                 : GENERIC_EXTERNAL_RUN_FAILURE_TEXT));
   const userVisibleFallbackText = resolveExternalRunFailureTextForConversation({
-    text: renderPostCompactionFailureText(fallbackText, visibleCompactionCount),
+    text: fallbackText,
     sessionCtx: turn.sessionCtx,
     isGenericRunnerFailure: externalRunFailureReply?.isGenericRunnerFailure ?? false,
     cfg: turn.followupRun.run.config,
   });
-  if (visibleCompactionCount > 0) {
-    turn.replyOperation?.retainFailureUntilComplete();
-  }
   takePendingLifecycleTerminal().emit("error", err, { fallbackExhaustedFailure: true });
+  markPostCompactionModelFailure(turn.replyOperation);
   turn.replyOperation?.fail("run_failed", err);
   await params.modelPatch.fail(err);
   return {

@@ -35,11 +35,15 @@ import { resolveSilentReplyPolicy } from "../../config/silent-reply.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { buildCodexLoginRecovery } from "../codex-login-recovery.js";
-import { markReplyPayloadForSourceSuppressionDelivery } from "../reply-payload.js";
+import {
+  isReplyPayloadTerminalContent,
+  markReplyPayloadForSourceSuppressionDelivery,
+} from "../reply-payload.js";
 import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { ReplyPayload } from "../types.js";
+import type { ReplyOperation } from "./reply-run-registry.js";
 
 export function resolveReplyFailoverFacts(error: unknown, message: string) {
   const described = describeFailoverError(error);
@@ -307,6 +311,36 @@ export function markAgentRunFailureReplyPayload<T extends ReplyPayload>(payload:
     marked.isError = true;
   }
   return marked;
+}
+
+export function markPostCompactionModelFailure(operation: ReplyOperation | undefined): void {
+  const outcome = operation?.postCompactionOutcome;
+  if (outcome?.kind === "succeeded" && operation) {
+    operation.postCompactionOutcome = { kind: "later_model_failed", count: outcome.count };
+  }
+}
+
+export function renderPostCompactionFailurePayloads(
+  operation: ReplyOperation | undefined,
+  payloads: ReplyPayload[],
+): ReplyPayload[] {
+  const outcome = operation?.postCompactionOutcome;
+  if (outcome?.kind !== "later_model_failed") {
+    return payloads;
+  }
+  return payloads.map((payload) => {
+    if (
+      payload.isError !== true ||
+      !isReplyPayloadTerminalContent(payload) ||
+      typeof payload.text !== "string"
+    ) {
+      return payload;
+    }
+    return {
+      ...payload,
+      text: `⚠️ Context compaction succeeded, but the later model request still failed. ${payload.text.replace(/^⚠️\s*/u, "")}`,
+    };
+  });
 }
 
 export function buildTerminalAgentRunFailureReplyPayload(params: {

@@ -205,6 +205,12 @@ export async function runEmbeddedFallbackCandidate(
         onAssistantErrorMessagePersisted: params.onAssistantErrorMessagePersisted,
         onAutoCompaction: (outcome) => {
           recoveryCompactionCount = Math.max(recoveryCompactionCount, outcome.count);
+          const operation = turn.replyOperation;
+          const previous = operation?.postCompactionOutcome;
+          if (operation && (!previous || outcome.count > previous.count)) {
+            operation.postCompactionOutcome = outcome;
+            operation.retainFailureUntilComplete();
+          }
         },
         toolResultFormat: (() => {
           const channel = resolveMessageChannel(turn.sessionCtx.Surface, turn.sessionCtx.Provider);

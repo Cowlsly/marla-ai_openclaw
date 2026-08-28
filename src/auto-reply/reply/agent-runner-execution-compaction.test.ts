@@ -10,7 +10,6 @@ import {
   initialFallbackAttemptOptions,
   expectBlockReplyCall,
   createMinimalRunAgentTurnParams,
-  createTestFallbackSummaryError,
 } from "./agent-runner-execution.test-support.js";
 import type {
   FallbackRunnerParams,
@@ -144,13 +143,23 @@ describe("executeAgentTurn: compaction events", () => {
       params.onAutoCompaction?.({ kind: "succeeded", count: 1 });
       throw new Error("LLM request timed out.");
     });
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: BILLING_ERROR_USER_MESSAGE, isError: true }],
+      meta: { error: { kind: "billing", message: "billing unavailable" } },
+    });
     state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
       await params
         .run("openai", "gpt-5.6-luna", initialFallbackAttemptOptions(params))
         .catch(() => undefined);
-      throw createTestFallbackSummaryError({
-        message:
-          "All models failed (2): openai/gpt-5.6-luna: LLM request timed out. (timeout) | anthropic/claude-sonnet-4-6: billing unavailable (billing)",
+      return {
+        outcome: "exhausted",
+        result: await params.run(
+          "anthropic",
+          "claude-sonnet-4-6",
+          initialFallbackAttemptOptions(params),
+        ),
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
         attempts: [
           {
             provider: "openai",
@@ -165,19 +174,71 @@ describe("executeAgentTurn: compaction events", () => {
             reason: "billing",
           },
         ],
-      });
+      };
+    });
+
+    const result = await executeTestTurn({ replyOperation });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") {
+      throw new Error("expected settled fallback exhaustion");
+    }
+    expect(result.runResult.payloads).toEqual([
+      { text: BILLING_ERROR_USER_MESSAGE, isError: true },
+    ]);
+    expect(replyOperation.postCompactionOutcome).toEqual({
+      kind: "later_model_failed",
+      count: 1,
+    });
+    expect(retainFailureUntilCompleteMock).toHaveBeenCalled();
+  });
+
+  it("preserves successful compaction when the last fallback still overflows", async () => {
+    const { replyOperation, retainFailureUntilCompleteMock } = createMockReplyOperation();
+    state.isContextOverflowErrorMock.mockReturnValue(true);
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      params.onAutoCompaction?.({ kind: "succeeded", count: 1 });
+      throw new Error("LLM request timed out.");
+    });
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: {
+        error: {
+          kind: "context_overflow",
+          message: "This request exceeds the model's maximum context length",
+        },
+      },
+    });
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      await params
+        .run("openai", "gpt-5.6-luna", initialFallbackAttemptOptions(params))
+        .catch(() => undefined);
+      return {
+        outcome: "exhausted",
+        result: await params.run(
+          "anthropic",
+          "claude-sonnet-4-6",
+          initialFallbackAttemptOptions(params),
+        ),
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        attempts: [],
+      };
     });
 
     const result = await executeTestTurn({ replyOperation });
 
     expect(result.kind).toBe("final");
     if (result.kind !== "final") {
-      throw new Error("expected final reply");
+      throw new Error("expected terminal overflow failure");
     }
-    expect(result.payload.text).toBe(
-      `⚠️ Context compaction succeeded, but the later model request still failed. ${BILLING_ERROR_USER_MESSAGE.replace(/^⚠️\s*/u, "")}`,
-    );
-    expect(retainFailureUntilCompleteMock).toHaveBeenCalledOnce();
+    expect(result.payload.text).toMatch(/^⚠️ Auto-compaction could not recover this turn\./u);
+    expect(result.payload.text).toContain("use /compact");
+    expect(replyOperation.postCompactionOutcome).toEqual({
+      kind: "later_model_failed",
+      count: 1,
+    });
+    expect(retainFailureUntilCompleteMock).toHaveBeenCalled();
   });
 
   it("emits a compaction start notice when notifyUser is enabled", async () => {
