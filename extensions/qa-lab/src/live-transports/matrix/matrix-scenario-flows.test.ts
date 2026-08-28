@@ -127,8 +127,8 @@ describe("Matrix QA Lab scenario flows", () => {
       providerBudgetedScenarioIds.has(scenario.id),
     );
 
-    expect(providerBudgetedScenarios.map((scenario) => scenario.id).sort()).toEqual(
-      [...providerBudgetedScenarioIds].sort(),
+    expect(providerBudgetedScenarios.map((scenario) => scenario.id).toSorted()).toEqual(
+      [...providerBudgetedScenarioIds].toSorted(),
     );
     for (const scenario of providerBudgetedScenarios) {
       expect(scenario.execution, scenario.id).not.toHaveProperty("timeoutMs");
