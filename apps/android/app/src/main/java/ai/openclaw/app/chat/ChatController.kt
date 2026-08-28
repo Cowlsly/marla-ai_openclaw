@@ -624,6 +624,7 @@ class ChatController internal constructor(
   private val newChatCreateInFlight = AtomicBoolean(false)
 
   private var lastHealthPollAtMs: Long? = null
+  private val chatMetadataRequestSequence = AtomicLong(0)
   private var chatMetadataAgentId: String? = null
   private var chatMetadataLoadState = ChatMetadataLoadState.Unloaded
   private var sessionsListArchived = false
@@ -698,6 +699,7 @@ class ChatController internal constructor(
 
   /** Clears transient chat state when the operator gateway session disconnects. */
   fun onDisconnected(message: String) {
+    chatMetadataRequestSequence.incrementAndGet()
     retireMainSessionReadiness()
     reconciledOutboxBranchScopes.clear()
     ambiguousMutationReconciliationStates.clear()
@@ -824,6 +826,7 @@ class ChatController internal constructor(
 
   /** Invalidates and clears gateway-bound UI state before a target switch can race old responses. */
   fun onGatewayScopeChanging(retireRunState: Boolean = false) {
+    chatMetadataRequestSequence.incrementAndGet()
     retireMainSessionReadiness()
     disableSwarmProgress()
     synchronized(gatewayScopeApplyLock) {
@@ -2545,6 +2548,7 @@ class ChatController internal constructor(
         lastHandledTerminalRunId = null
         val nextAgentId = resolveAgentIdForSessionKey(key)
         if (chatMetadataAgentId != nextAgentId) {
+          chatMetadataRequestSequence.incrementAndGet()
           _commands.value = emptyList()
           _modelCatalog.value = emptyList()
           chatMetadataAgentId = null
@@ -3412,6 +3416,11 @@ class ChatController internal constructor(
       "chat" -> {
         if (payloadJson.isNullOrBlank()) return
         handleChatEvent(payloadJson)
+      }
+      "chat.metadata.changed" -> {
+        // Fence older reads before launching; the last accepted catalog stays visible during refresh.
+        val requestSequence = chatMetadataRequestSequence.incrementAndGet()
+        scope.launch { fetchChatMetadata(requestSequence) }
       }
       "sessions.changed" -> {
         if (payloadJson.isNullOrBlank()) {
@@ -4447,7 +4456,8 @@ class ChatController internal constructor(
     return false
   }
 
-  private suspend fun fetchChatMetadata() {
+  private suspend fun fetchChatMetadata(requestSequence: Long = chatMetadataRequestSequence.incrementAndGet()) {
+    if (requestSequence != chatMetadataRequestSequence.get()) return
     val requestCacheScope = currentCacheScope()
     val agentId = resolveAgentIdForSessionKey(_sessionKey.value) ?: return
     var shouldRefreshSwarm = false
@@ -4461,7 +4471,11 @@ class ChatController internal constructor(
       val root = json.parseToJsonElement(res).asObjectOrNull()
       val metadataSwarmEnabled = root?.get("swarmEnabled").asBooleanOrNull() == true
       synchronized(gatewayScopeApplyLock) {
-        if (requestCacheScope == currentCacheScope() && agentId == resolveAgentIdForSessionKey(_sessionKey.value)) {
+        if (
+          requestSequence == chatMetadataRequestSequence.get() &&
+          requestCacheScope == currentCacheScope() &&
+          agentId == resolveAgentIdForSessionKey(_sessionKey.value)
+        ) {
           _commands.value = parseChatCommands(json, res)
           val models = parseGatewayModels(root?.get("models") as? JsonArray)
           _modelCatalog.value = models
@@ -4480,16 +4494,7 @@ class ChatController internal constructor(
         }
       }
     } catch (_: Throwable) {
-      synchronized(gatewayScopeApplyLock) {
-        if (requestCacheScope == currentCacheScope() && agentId == resolveAgentIdForSessionKey(_sessionKey.value)) {
-          _commands.value = emptyList()
-          _modelCatalog.value = emptyList()
-          chatMetadataAgentId = null
-          chatMetadataLoadState = ChatMetadataLoadState.Unloaded
-          synchronized(swarmLock) { swarmEnabled = false }
-          shouldDisableSwarm = true
-        }
-      }
+      // A transport failure is not a replacement availability or capability snapshot.
     }
     when {
       shouldRefreshSwarm -> refreshSwarmSessions()

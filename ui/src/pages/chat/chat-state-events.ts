@@ -8,6 +8,7 @@ import {
 import type { GatewayEventFrame } from "../../api/gateway.ts";
 import { fireFirstReplyConfetti } from "../../components/confetti.ts";
 import { isGitHubPullRequestLink } from "../../components/github-link-target.ts";
+import { invalidateChatMetadataStore } from "../../lib/chat/chat-metadata-store.ts";
 import type { ChatQueueItem } from "../../lib/chat/chat-types.ts";
 import { extractText } from "../../lib/chat/message-extract.ts";
 import { pickFreshestObserverDigest } from "../../lib/observer-digest.ts";
@@ -338,6 +339,17 @@ function handleSessionsChangedEvent(
     state.retireSessionCompanion?.(event.key, event.agentId);
   }
   const resetsSelectedSession = matchesChat && resetsSession;
+  if (
+    matchesChat &&
+    state.client &&
+    (resetsSession || source?.reason === "command-metadata" || source?.reason === "patch")
+  ) {
+    // Selection commands and model patches can change the persisted profile without changing credentials.
+    invalidateChatMetadataStore(state.client, {
+      agentId: resolveChatAgentId(state) ?? undefined,
+      sessionKey: state.sessionKey,
+    });
+  }
   if (resetsSelectedSession) {
     const scope = readChatSessionProjectionScope(state, { agentId: resolveChatAgentId(state) });
     // Reset keeps the public session ID; the explicit reducer event is the

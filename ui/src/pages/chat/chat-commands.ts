@@ -232,7 +232,7 @@ function loadRemoteSlashCommands(
   client: GatewayBrowserClient,
   agentId: string | undefined,
 ): Promise<SlashCommandDef[]> {
-  const metadata = peekChatMetadata(client, agentId);
+  const metadata = peekChatMetadata(client, { agentId });
   // Store-held metadata carries app-level invalidation on config changes and logical reconnects,
   // so no TTL applies here. The cache below owns only commands.list-derived entries.
   if (Array.isArray(metadata?.commands)) {

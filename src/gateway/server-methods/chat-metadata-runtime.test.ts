@@ -64,6 +64,7 @@ function createHarness(
     beforeRefresh?: () => Promise<void>;
     refreshOnRead?: boolean;
     useDefaultProjection?: boolean;
+    onChanged?: () => void;
   } = {},
 ) {
   const { useDefaultProjection = false, ...gatewayRuntimeOptions } = runtimeOptions;
@@ -178,6 +179,56 @@ function createHarness(
 }
 
 describe("gateway chat metadata runtime", () => {
+  test("notifies once per settlement, including same-epoch recovery, without an unavailable-read loop", async () => {
+    const onChanged = vi.fn();
+    const harness = createHarness(undefined, { onChanged });
+    const owner = harness.getPreparedOwner();
+    harness.getPreparedOwner.mockReturnValue(undefined);
+    await expect(harness.runtime.refresh()).rejects.toThrow("owner is unavailable");
+    for (let read = 0; read < 3; read += 1) {
+      await expect(harness.runtime.read({ agentId: "main" })).rejects.toThrow(
+        "owner is unavailable",
+      );
+    }
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    harness.getPreparedOwner.mockReturnValue(owner);
+    await harness.runtime.read({ agentId: "main" });
+    await harness.runtime.refresh();
+    expect(onChanged).toHaveBeenCalledTimes(2);
+    harness.runtime.invalidate();
+    harness.runtime.fail(new Error("replacement failed"));
+    await expect(harness.runtime.read({ agentId: "main" })).rejects.toThrow("replacement failed");
+    expect(onChanged).toHaveBeenCalledTimes(3);
+  });
+
+  test.each(["resolve", "reject"] as const)(
+    "never announces an obsolete build's %s after terminal failure",
+    async (settlement) => {
+      const onChanged = vi.fn();
+      const harness = createHarness(undefined, { onChanged });
+      const gate = createDeferred();
+      harness.buildProjection.mockImplementationOnce(async ({ facts }) => {
+        await gate.promise;
+        if (settlement === "reject") {
+          throw new Error("obsolete build");
+        }
+        return { models: facts.modelCatalog.entries, modelCatalog: facts.modelCatalog.entries };
+      });
+      const build = harness.runtime.refresh();
+      await vi.waitFor(() => expect(harness.buildProjection).toHaveBeenCalledOnce());
+      harness.runtime.fail(new Error("owner failed"));
+      gate.resolve();
+      await build;
+      expect(onChanged).toHaveBeenCalledOnce();
+      await expect(harness.runtime.read({ agentId: "main" })).rejects.toThrow("owner failed");
+      await harness.runtime.refresh();
+      expect(onChanged).toHaveBeenCalledTimes(2);
+      await expect(harness.runtime.read({ agentId: "main" })).resolves.toMatchObject({
+        models: [expect.objectContaining({ id: "first" })],
+      });
+    },
+  );
+
   test("refreshes lazily on the first read when configured", async () => {
     const beforeRefresh = vi.fn(async () => {});
     const harness = createHarness(undefined, { beforeRefresh, refreshOnRead: true });
@@ -679,6 +730,52 @@ describe("gateway chat metadata runtime", () => {
       models: [expect.objectContaining({ id: "gpt-5.6-sol", available: true })],
     });
     expect(loadFullModelCatalog).not.toHaveBeenCalled();
+  });
+
+  test("keeps a locked session unavailable while the neutral prepared route is usable", async () => {
+    const harness = createHarness(
+      {
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.6-sol" },
+            models: { "openai/gpt-5.6-sol": {} },
+          },
+          list: [{ id: "main", default: true }],
+        },
+      },
+      { useDefaultProjection: true },
+    );
+    harness.setOwner(
+      createOwner(
+        harness.getPreparedOwner()!.config,
+        "gpt-5.6-sol",
+        {
+          openai: {
+            type: "oauth",
+            access: "synthetic-access",
+            refresh: "synthetic-refresh",
+            expires: Date.now() + 60_000,
+          },
+        },
+        "openai",
+        "openai-chatgpt-responses",
+      ),
+    );
+    harness.setAuthStore({ version: 1, profiles: {} });
+    await harness.runtime.refresh();
+    const sessionEntry = {
+      authProfileOverride: "openai:missing-lock",
+      authProfileOverrideSource: "user" as const,
+    };
+    const startup = await harness.runtime.readStartup({ agentId: "main", sessionEntry });
+    const scoped = await harness.runtime.read({ agentId: "main", sessionEntry });
+    expect(scoped).toEqual(startup?.metadata);
+    expect(scoped.models).toEqual([
+      expect.objectContaining({ available: false, unavailableReason: "auth-failed" }),
+    ]);
+    await expect(harness.runtime.read({ agentId: "main" })).resolves.toMatchObject({
+      models: [expect.objectContaining({ available: true })],
+    });
   });
 
   test("adopts discovered wildcard models without restarting provider discovery", async () => {

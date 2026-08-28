@@ -5,6 +5,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.JsonObject
@@ -929,6 +930,173 @@ class ChatControllerModelSelectionTest {
     }
 
   @Test
+  fun metadataChangeRetainsAvailabilityUntilAcceptedRefreshWithoutReloadingChat() =
+    runTest {
+      val pendingRefresh = CompletableDeferred<String>()
+      var metadataRequests = 0
+      val (controller, requests) =
+        chatControllerTestSetup {
+          respond("chat.history", historyResponse("session-main", listOf(ReplayHistoryMessage("assistant", "Earlier reply", 1))))
+          respond("chat.metadata") {
+            metadataRequests += 1
+            when (metadataRequests) {
+              2 -> pendingRefresh.await()
+              4 -> availabilityMetadata(true)
+              else -> availabilityMetadata(false)
+            }
+          }
+        }
+      controller.load("main")
+      advanceUntilIdle()
+      assertTrue(controller.setSessionModelAwait("main", "openai/gpt-5.6-luna"))
+      val messages = controller.messages.value
+      val historyRequests = requests.count { it.first == "chat.history" }
+      val sessionRequests = requests.count { it.first == "sessions.list" }
+      assertEquals(
+        false,
+        controller.modelCatalog.value
+          .single()
+          .available,
+      )
+
+      controller.handleGatewayEvent("chat.metadata.changed", "{}")
+      runCurrent()
+      assertEquals(2, metadataRequests)
+      assertEquals(
+        false,
+        controller.modelCatalog.value
+          .single()
+          .available,
+      )
+
+      pendingRefresh.completeExceptionally(IllegalStateException("transport failed"))
+      advanceUntilIdle()
+      assertEquals(
+        false,
+        controller.modelCatalog.value
+          .single()
+          .available,
+      )
+
+      controller.handleGatewayEvent("chat.metadata.changed", "{}")
+      advanceUntilIdle()
+      assertEquals(
+        false,
+        controller.modelCatalog.value
+          .single()
+          .available,
+      )
+
+      controller.handleGatewayEvent("chat.metadata.changed", "{}")
+      advanceUntilIdle()
+      assertEquals(
+        true,
+        controller.modelCatalog.value
+          .single()
+          .available,
+      )
+      assertEquals("openai/gpt-5.6-luna", controller.selectedModelRef.value)
+      assertEquals(messages, controller.messages.value)
+      assertEquals(historyRequests, requests.count { it.first == "chat.history" })
+      assertEquals(sessionRequests, requests.count { it.first == "sessions.list" })
+    }
+
+  @Test
+  fun newerMetadataPublicationFencesOlderResponseAndFailure() =
+    runTest {
+      for (oldRequestFails in listOf(false, true)) {
+        val oldRefresh = CompletableDeferred<String>()
+        var metadataRequests = 0
+        val controller =
+          createScriptedChatController {
+            respond("chat.metadata") {
+              metadataRequests += 1
+              when (metadataRequests) {
+                2 -> oldRefresh.await()
+                3 -> availabilityMetadata(true)
+                else -> availabilityMetadata(false)
+              }
+            }
+          }
+        controller.handleGatewayEvent("health", null)
+        advanceUntilIdle()
+        controller.handleGatewayEvent("chat.metadata.changed", "{}")
+        runCurrent()
+        controller.handleGatewayEvent("chat.metadata.changed", "{}")
+        runCurrent()
+        assertEquals(3, metadataRequests)
+        assertEquals(
+          true,
+          controller.modelCatalog.value
+            .single()
+            .available,
+        )
+
+        if (oldRequestFails) {
+          oldRefresh.completeExceptionally(IllegalStateException("stale transport failure"))
+        } else {
+          oldRefresh.complete(availabilityMetadata(false))
+        }
+        advanceUntilIdle()
+        assertEquals(
+          true,
+          controller.modelCatalog.value
+            .single()
+            .available,
+        )
+      }
+    }
+
+  @Test
+  fun metadataPublicationCannotCrossDisconnectOrAgentRoundTrip() =
+    runTest {
+      for (disconnect in listOf(false, true)) {
+        val oldRefresh = CompletableDeferred<String>()
+        var metadataRequests = 0
+        val controller =
+          createScriptedChatController {
+            respond("chat.metadata") {
+              metadataRequests += 1
+              if (metadataRequests == 2) oldRefresh.await() else availabilityMetadata(false)
+            }
+            respond("chat.history", historyResponse("session-current", emptyList()))
+          }
+        controller.handleGatewayEvent("health", null)
+        advanceUntilIdle()
+        controller.handleGatewayEvent("chat.metadata.changed", "{}")
+        runCurrent()
+        assertEquals(2, metadataRequests)
+
+        if (disconnect) {
+          controller.onDisconnected("Offline")
+          assertTrue(controller.modelCatalog.value.isEmpty())
+          controller.handleGatewayEvent("health", null)
+          runCurrent()
+        } else {
+          controller.switchSession("agent:ops:main")
+          runCurrent()
+          controller.switchSession("main")
+          runCurrent()
+        }
+        assertEquals(
+          false,
+          controller.modelCatalog.value
+            .single()
+            .available,
+        )
+
+        oldRefresh.complete(availabilityMetadata(true))
+        advanceUntilIdle()
+        assertEquals(
+          false,
+          controller.modelCatalog.value
+            .single()
+            .available,
+        )
+      }
+    }
+
+  @Test
   fun emptyModelCatalogIsRetriedOnNextHealthEvent() =
     runTest {
       var metadataRequests = 0
@@ -1084,6 +1252,8 @@ class ChatControllerModelSelectionTest {
 
       assertEquals(listOf("max"), sentThinkingLevels)
     }
+
+  private fun availabilityMetadata(available: Boolean): String = """{"commands":[],"models":[{"id":"gpt-5.6-luna","provider":"openai","available":$available,"input":["text"]}]}"""
 
   private fun thinkingFields(
     level: String?,
