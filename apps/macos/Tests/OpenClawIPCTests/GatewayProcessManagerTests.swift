@@ -71,6 +71,7 @@ struct GatewayProcessManagerTests {
     private func withGatewayConfig<T>(
         mode: String,
         port: Int? = nil,
+        homeDirectory: URL? = nil,
         _ body: () async throws -> T) async throws -> T
     {
         let configPath = TestIsolation.tempConfigPath()
@@ -79,15 +80,21 @@ struct GatewayProcessManagerTests {
         try Data(config.utf8)
             .write(to: URL(fileURLWithPath: configPath))
         defer { try? FileManager.default.removeItem(atPath: configPath) }
-        return try await TestIsolation.withEnvValues([
+        var environment: [String: String?] = [
             "OPENCLAW_CONFIG_PATH": configPath,
             "OPENCLAW_GATEWAY_PORT": nil,
-        ], body)
+        ]
+        if let homeDirectory {
+            environment["HOME"] = homeDirectory.path
+            environment["CFFIXED_USER_HOME"] = homeDirectory.path
+        }
+        return try await TestIsolation.withEnvValues(environment, body)
     }
 
     private func withLaunchAgentEnvironment<T>(
         mode: String = "local",
         port: Int? = nil,
+        homeDirectory: URL? = nil,
         statusPayload: String? = nil,
         statusPayloads: [String]? = nil,
         commandDelayNanoseconds: UInt64 = 0,
@@ -95,7 +102,7 @@ struct GatewayProcessManagerTests {
     {
         let marker = FileManager.default.temporaryDirectory
             .appendingPathComponent("openclaw-launchagent-marker-\(UUID().uuidString)")
-        return try await self.withGatewayConfig(mode: mode, port: port) {
+        return try await self.withGatewayConfig(mode: mode, port: port, homeDirectory: homeDirectory) {
             GatewayLaunchAgentManager.setTestingDisableLaunchAgentMarkerURL(marker)
             GatewayLaunchAgentManager.setTestingInterceptDaemonCommands(true)
             if let statusPayloads {
@@ -1639,6 +1646,81 @@ struct GatewayProcessManagerTests {
 
             await connection.shutdown()
             await PortGuardian.shared.setTestingDescriptor(nil, forPort: port)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func `pause preserves established installation after service removal`(_ managed: Bool) async throws {
+        let root = try makeTempDirForTests()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let port = try self.availableGatewayPort()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let (_, connection, manager) = self.makeGatewayReadinessFixture(url: url) {
+            self.gatewayTask(healthSucceedsAfter: 0)
+        }
+        defer { manager.setTestingConnection(nil) }
+        try await self.withLaunchAgentEnvironment(port: port, homeDirectory: root) {
+            manager.setTestingSkipControlChannelRefresh(true)
+            defer { manager.setTestingSkipControlChannelRefresh(false) }
+            let plist = GatewayLaunchAgentManager.plistURL(homeDirectory: root, profile: .current)
+            if managed {
+                try FileManager.default.createDirectory(
+                    at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let data = try PropertyListSerialization.data(
+                    fromPropertyList: ["ProgramArguments": [CLIInstaller.managedExecutableLocation(), "gateway"]],
+                    format: .xml, options: 0)
+                try data.write(to: plist)
+            }
+            #expect(await manager._testAttachExistingGatewayIfAvailable(port: port))
+            #expect(manager.installation == (managed ? .managed : .external))
+            manager.stop()
+            _ = await manager._testAttachExistingGatewayAfterPendingDisable(port: port)
+            #expect(GatewayLaunchAgentManager.testingDaemonCommandCallsSnapshot().contains(["uninstall"]))
+            if managed {
+                // Match uninstallLaunchAgent's filesystem effect without touching launchd.
+                try FileManager.default.moveItem(at: plist, to: root.appendingPathComponent("uninstalled.plist"))
+            }
+            #expect(!FileManager.default.fileExists(atPath: plist.path))
+            #expect(manager.status == .stopped)
+            #expect(manager.installation == (managed ? .managed : .external))
+            await connection.shutdown()
+        }
+    }
+
+    @Test func `failed reattachment releases departed independent Gateway ownership`() async throws {
+        let port = try self.availableGatewayPort()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let (_, connection, manager) = self.makeGatewayReadinessFixture(url: url) {
+            self.gatewayTask(healthSucceedsAfter: 0)
+        }
+        defer { manager.setTestingConnection(nil) }
+        try await self.withLaunchAgentEnvironment(port: port) {
+            manager.setTestingSkipControlChannelRefresh(true)
+            defer { manager.setTestingSkipControlChannelRefresh(false) }
+            #expect(await manager._testAttachExistingGatewayIfAvailable(port: port))
+            #expect(manager.installation == .external)
+
+            manager.stop()
+            #expect(manager.installation == .external)
+            _ = await manager._testAttachExistingGatewayAfterPendingDisable(port: port)
+            await connection.shutdown()
+
+            let configPath = try #require(ProcessInfo.processInfo.environment["OPENCLAW_CONFIG_PATH"])
+            try Data(#"{"gateway":{"mode":"remote"}}"#.utf8)
+                .write(to: URL(fileURLWithPath: configPath))
+            manager.stop()
+            _ = await manager._testAttachExistingGatewayAfterPendingDisable(port: port)
+            try Data("{\"gateway\":{\"mode\":\"local\",\"port\":\(port)}}".utf8)
+                .write(to: URL(fileURLWithPath: configPath))
+
+            let unavailable = GatewayConnection(configProvider: { throw URLError(.cannotConnectToHost) })
+            manager.setTestingConnection(unavailable)
+            manager._testBeginGatewayStartGeneration()
+            #expect(await manager._testAttachExistingGatewayAfterPendingDisable(port: port) == false)
+            #expect(manager.installation == .managed)
+            #expect(GatewayLaunchAgentManager.testingDaemonCommandCallsSnapshot()
+                .allSatisfy { $0.first != "install" })
+            await unavailable.shutdown()
         }
     }
 

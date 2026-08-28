@@ -46,9 +46,11 @@ the private worker is not a replacement for a CLI or Gateway installation.
 
 Remote connections and attachment to an independently managed local Gateway
 skip this installation. Attach-only mode never prompts for a CLI to run the
-app's node. Pausing or reconnecting does not turn an observed independent local
-attachment into an app-managed installation. An unreadable service ownership record blocks automatic installation
-instead of being treated as a missing service; check the LaunchAgent and retry.
+app's node. Pausing preserves who manages the Gateway, even when stopping an
+app-managed service removes its LaunchAgent record. If an independent endpoint
+is no longer available on reattachment, local setup becomes available again.
+An unreadable service ownership record blocks automatic installation instead
+of being treated as a missing service; check the LaunchAgent and retry.
 
 ## Manual recovery
 

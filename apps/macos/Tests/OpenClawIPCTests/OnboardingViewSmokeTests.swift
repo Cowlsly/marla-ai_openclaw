@@ -62,7 +62,6 @@ struct OnboardingViewSmokeTests {
                 GatewayLaunchAgentManager.clearTestingDaemonCommandCalls()
                 manager.setTestingStatus(previousStatus)
             }
-            manager.setTestingStatus(scenario.contains("attachment") ? .attachedExisting(details: nil) : .stopped)
             let plist = GatewayLaunchAgentManager.plistURL(homeDirectory: root, profile: AppProfile(environment: [:]))
             let managedAttachment = scenario.hasSuffix("managed-attachment")
             if managedAttachment || ["external-service", "unreadable"].contains(scenario) {
@@ -76,10 +75,15 @@ struct OnboardingViewSmokeTests {
                     fromPropertyList: ["ProgramArguments": [executable, "gateway"]], format: .xml, options: 0)
                 try data.write(to: plist)
             }
+            manager.setTestingStatus(scenario.contains("attachment") ? .attachedExisting(details: nil) : .stopped)
             if scenario.hasPrefix("paused-") {
                 manager.stop()
                 _ = await manager._testAttachExistingGatewayAfterPendingDisable(port: 0)
                 #expect(manager.status == .stopped)
+                if managedAttachment {
+                    // The real CLI uninstall removes this ownership record.
+                    try FileManager.default.moveItem(at: plist, to: root.appendingPathComponent("uninstalled.plist"))
+                }
             }
             let state = AppState(preview: true)
             state.onboardingSeen = false
