@@ -151,6 +151,7 @@ private actor GatewayEndpointRemoteEnsureGate {
     }
 }
 
+@Suite(.gatewayTLSKeychainIsolated)
 struct GatewayEndpointStoreTests {
     @MainActor
     @Test func `live local source uses canonical default and named profile ports`() async throws {

@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Testing
 @testable import OpenClawKit
 
 private final class MacGatewayTLSFakeKeychain: @unchecked Sendable {
@@ -83,5 +84,25 @@ func withFakeGatewayTLSKeychain<T>(_ operation: () async throws -> T) async reth
     let keychain = MacGatewayTLSFakeKeychain()
     return try await GatewayTLSStore.$keychainOperations.withValue(keychain.operations) {
         try await operation()
+    }
+}
+
+struct GatewayTLSKeychainIsolationTrait: SuiteTrait, TestTrait, TestScoping {
+    var isRecursive: Bool {
+        true
+    }
+
+    func provideScope(
+        for _: Test,
+        testCase _: Test.Case?,
+        performing function: @Sendable () async throws -> Void) async throws
+    {
+        try await withFakeGatewayTLSKeychain(function)
+    }
+}
+
+extension Trait where Self == GatewayTLSKeychainIsolationTrait {
+    static var gatewayTLSKeychainIsolated: Self {
+        Self()
     }
 }

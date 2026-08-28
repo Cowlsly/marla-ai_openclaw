@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import OpenClaw
 
+@Suite(.gatewayTLSKeychainIsolated)
 struct MacGatewayProfilesTests {
     @Test func `canonical route identity normalizes authority but preserves path`() throws {
         let implicit = try MacGatewayProfileStore.canonicalURL(

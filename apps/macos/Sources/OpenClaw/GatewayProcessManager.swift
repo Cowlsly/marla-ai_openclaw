@@ -134,6 +134,10 @@ final class GatewayProcessManager {
         didSet { CanvasManager.shared.refreshDebugStatus() }
     }
 
+    /// Pause and reconnect change readiness, not who supplied this local endpoint.
+    /// Service records still take precedence over the remembered connection.
+    private var connectedGatewayPort: Int?
+
     private(set) var log: String = ""
     private(set) var environmentStatus: GatewayEnvironmentStatus = .checking
     private(set) var existingGatewayDetails: String?
@@ -152,12 +156,7 @@ final class GatewayProcessManager {
         if !arguments.isEmpty {
             return CLIInstallPrompter.launchAgentUsesManagedCLI(programArguments: arguments) ? .managed : .external
         }
-        // Attaching is not ownership: an app-managed Gateway can already be running.
-        // Only an attachment without a managed service record skips local CLI setup.
-        switch self.status {
-        case .running, .attachedExisting: return .external
-        case .stopped, .starting, .failed: return .managed
-        }
+        return self.connectedGatewayPort == GatewayEnvironment.gatewayPort() ? .external : .managed
     }
 
     private var desiredActive = false
@@ -1099,6 +1098,7 @@ extension GatewayProcessManager {
             }
             self.setLaunchAgentReadinessState(candidate: nil, failure: nil)
             self.clearLastFailure()
+            self.connectedGatewayPort = context.port
             if case .attach = context.purpose {
                 self.existingGatewayDetails = details
                 self.status = .attachedExisting(details: details)
@@ -1269,6 +1269,10 @@ extension GatewayProcessManager {
     }
 
     func setTestingStatus(_ status: Status) {
+        self.connectedGatewayPort = switch status {
+        case .running, .attachedExisting: GatewayEnvironment.gatewayPort()
+        case .stopped, .starting, .failed: nil
+        }
         self.status = status
     }
 

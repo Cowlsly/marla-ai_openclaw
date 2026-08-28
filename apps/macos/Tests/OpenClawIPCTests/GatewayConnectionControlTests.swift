@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OpenClawChatUI
 import OpenClawProtocol
@@ -712,7 +713,7 @@ private func assertConfigLookupCannotRecreateRoute(
             tls: firstTLS,
             routeAuthority: nil,
             revision: 1))
-        let connection = GatewayConnection(endpointProvider: { source.snapshot() })
+        let connection = GatewayConnection(testEndpointProvider: { source.snapshot() })
 
         try await connection.refresh()
         let firstGeneration = await connection._test_routeGeneration()
@@ -1241,6 +1242,8 @@ private func assertConfigLookupCannotRecreateRoute(
                     routeAuthority: nil,
                     deviceAuthGatewayID: route.owner)
             },
+            supportsSharedEndpointRecovery: false,
+            activationBindingKeyProvider: { SymmetricKey(data: Data(repeating: 1, count: 32)) },
             sessionBox: WebSocketSessionBox(session: session))
         _ = try await connection.request(
             method: "health",
