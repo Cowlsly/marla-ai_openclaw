@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core";
 import type { SandboxBackendHandle, SandboxFsBridge } from "openclaw/plugin-sdk/sandbox";
 import { expect } from "vitest";
+import { z } from "zod";
 
 type ExecResult = {
   code: number;
@@ -71,6 +73,85 @@ export async function runCommand(params: {
     });
 
     child.stdin.end(params.stdin);
+  });
+}
+
+export async function cleanupOpenShellWorkspace(params: {
+  command: string;
+  env: NodeJS.ProcessEnv;
+  workspace: string;
+  sandboxNames: string[];
+}): Promise<void> {
+  const deadline = Date.now() + 2 * 60_000;
+  const remainingMs = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error("OpenShell sandbox cleanup did not complete within 120 seconds");
+    }
+    return remaining;
+  };
+  const ownedNames = new Set(params.sandboxNames);
+  const listNames = async () => {
+    const result = await runCommand({
+      command: params.command,
+      args: [
+        "--workspace",
+        params.workspace,
+        "sandbox",
+        "list",
+        "--limit",
+        String(ownedNames.size + 1),
+        "--output",
+        "json",
+      ],
+      env: params.env,
+      timeoutMs: remainingMs(),
+    });
+    remainingMs();
+    const sandboxes = z
+      .array(z.object({ name: z.string().min(1) }))
+      .parse(JSON.parse(result.stdout));
+    const names = sandboxes.map((sandbox) => sandbox.name);
+    // This isolated workspace contains only the fixture's owned sandboxes. An extra
+    // row or unexpected name must fail, never masquerade as a complete inventory.
+    if (
+      names.length > ownedNames.size ||
+      new Set(names).size !== names.length ||
+      names.some((name) => !ownedNames.has(name))
+    ) {
+      throw new Error("Unexpected sandbox inventory in OpenShell fixture workspace");
+    }
+    return names;
+  };
+  const presentNames = await listNames();
+  const failures: unknown[] = [];
+  for (const sandboxName of [...ownedNames].filter((name) => presentNames.includes(name))) {
+    try {
+      await runCommand({
+        command: params.command,
+        args: ["--workspace", params.workspace, "sandbox", "delete", sandboxName],
+        env: params.env,
+        timeoutMs: remainingMs(),
+      });
+      // OpenShell v0.0.109 acknowledges deletion before its controller removes the
+      // durable row. Observe absence before deleting the workspace; never retry errors.
+      if (failures.length === 0) {
+        while ((await listNames()).includes(sandboxName)) {
+          await delay(Math.min(250, remainingMs()));
+        }
+      }
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "OpenShell sandbox cleanup failed");
+  }
+  await runCommand({
+    command: params.command,
+    args: ["workspace", "delete", params.workspace],
+    env: params.env,
+    timeoutMs: 30_000,
   });
 }
 

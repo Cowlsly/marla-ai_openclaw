@@ -848,7 +848,8 @@ Native dependency policy:
   - Opt-in only; not part of the default `pnpm test:e2e` run
   - Requires a local `openshell` CLI plus a working Docker daemon
   - Requires an active local OpenShell gateway and its config source
-  - Uses isolated `HOME` / `XDG_CONFIG_HOME`, then destroys the test sandbox
+  - Uses isolated `HOME` / `XDG_CONFIG_HOME`, then waits for durable sandbox absence before deleting the test workspace
+  - Reports cleanup failures, including failed inventory queries; it does not retry database errors
 - Useful overrides:
   - `OPENCLAW_E2E_OPENSHELL=1` to enable the test when running the broader e2e suite manually
   - `OPENCLAW_E2E_OPENSHELL_COMMAND=/path/to/openshell` to point at a non-default CLI binary or wrapper script

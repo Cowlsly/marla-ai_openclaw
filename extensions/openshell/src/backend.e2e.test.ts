@@ -11,6 +11,7 @@ import {
 } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it } from "vitest";
 import {
+  cleanupOpenShellWorkspace,
   runCommand,
   runBackendExec,
   runPreparedBackendExec,
@@ -253,7 +254,6 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
           await runCommand({
             command: "docker",
             args: ["rm", "-f", containerId],
-            allowFailure: true,
             timeoutMs: 30_000,
           });
         },
@@ -481,6 +481,7 @@ describe("openshell sandbox backend e2e", () => {
         cfg: sandboxCfg,
       });
 
+      const failures: unknown[] = [];
       try {
         process.env.HOME = env.HOME;
         process.env.XDG_CONFIG_HOME = env.XDG_CONFIG_HOME;
@@ -867,53 +868,66 @@ describe("openshell sandbox backend e2e", () => {
             token: held.finalizeToken,
           });
         }
+      } catch (error) {
+        failures.push(error);
       } finally {
-        for (const sandboxName of [
-          backend.runtimeId,
-          mirrorBackend.runtimeId,
-          overlapBackend.runtimeId,
-          allowBackend.runtimeId,
-        ]) {
-          await runCommand({
-            command: OPENCLAW_OPENSHELL_COMMAND,
-            args: ["--workspace", openShellWorkspace, "sandbox", "delete", sandboxName],
-            env,
-            allowFailure: true,
-            timeoutMs: 2 * 60_000,
-          });
+        try {
+          if (workspaceCreated) {
+            await cleanupOpenShellWorkspace({
+              command: OPENCLAW_OPENSHELL_COMMAND,
+              env,
+              workspace: openShellWorkspace,
+              sandboxNames: [
+                backend.runtimeId,
+                mirrorBackend.runtimeId,
+                overlapBackend.runtimeId,
+                allowBackend.runtimeId,
+              ],
+            });
+          }
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          try {
+            const socketServer = mirrorSocketServer;
+            if (socketServer) {
+              await new Promise<void>((resolve, reject) => {
+                socketServer.close((error) => (error ? reject(error) : resolve()));
+              });
+            }
+          } catch (error) {
+            failures.push(error);
+          }
+          try {
+            await hostPolicyServer?.close();
+          } catch (error) {
+            failures.push(error);
+          }
+          try {
+            await fs.rm(rootDir, { recursive: true, force: true });
+          } catch (error) {
+            failures.push(error);
+          } finally {
+            if (previousHome === undefined) {
+              delete process.env.HOME;
+            } else {
+              process.env.HOME = previousHome;
+            }
+            if (previousXdgConfigHome === undefined) {
+              delete process.env.XDG_CONFIG_HOME;
+            } else {
+              process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+            }
+            if (previousXdgCacheHome === undefined) {
+              delete process.env.XDG_CACHE_HOME;
+            } else {
+              process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+            }
+          }
         }
-        if (workspaceCreated) {
-          await runCommand({
-            command: OPENCLAW_OPENSHELL_COMMAND,
-            args: ["workspace", "delete", openShellWorkspace],
-            env,
-            allowFailure: true,
-            timeoutMs: 30_000,
-          });
-        }
-        const socketServer = mirrorSocketServer;
-        if (socketServer) {
-          await new Promise<void>((resolve) => {
-            socketServer.close(() => resolve());
-          });
-        }
-        await hostPolicyServer?.close().catch(() => {});
-        await fs.rm(rootDir, { recursive: true, force: true });
-        if (previousHome === undefined) {
-          delete process.env.HOME;
-        } else {
-          process.env.HOME = previousHome;
-        }
-        if (previousXdgConfigHome === undefined) {
-          delete process.env.XDG_CONFIG_HOME;
-        } else {
-          process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
-        }
-        if (previousXdgCacheHome === undefined) {
-          delete process.env.XDG_CACHE_HOME;
-        } else {
-          process.env.XDG_CACHE_HOME = previousXdgCacheHome;
-        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "OpenShell E2E or cleanup failed");
       }
     },
   );
