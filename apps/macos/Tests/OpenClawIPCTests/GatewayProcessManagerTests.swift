@@ -74,21 +74,28 @@ struct GatewayProcessManagerTests {
         homeDirectory: URL? = nil,
         _ body: () async throws -> T) async throws -> T
     {
+        let isolatedHome = try homeDirectory ?? makeTempDirForTests()
+        defer {
+            if homeDirectory == nil { try? FileManager.default.removeItem(at: isolatedHome) }
+        }
         let configPath = TestIsolation.tempConfigPath()
         let portFragment = port.map { ",\"port\":\($0)" } ?? ""
         let config = #"{"gateway":{"mode":"\#(mode)""# + portFragment + "}}"
         try Data(config.utf8)
             .write(to: URL(fileURLWithPath: configPath))
         defer { try? FileManager.default.removeItem(atPath: configPath) }
-        var environment: [String: String?] = [
+        let environment: [String: String?] = [
             "OPENCLAW_CONFIG_PATH": configPath,
             "OPENCLAW_GATEWAY_PORT": nil,
+            "HOME": isolatedHome.path,
+            "CFFIXED_USER_HOME": isolatedHome.path,
         ]
-        if let homeDirectory {
-            environment["HOME"] = homeDirectory.path
-            environment["CFFIXED_USER_HOME"] = homeDirectory.path
+        return try await TestIsolation.withEnvValues(environment) {
+            // Service ownership reads must stay inside this fixture's home, even without an explicit plist.
+            try #require(FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL == isolatedHome
+                .standardizedFileURL)
+            return try await body()
         }
-        return try await TestIsolation.withEnvValues(environment, body)
     }
 
     private func withLaunchAgentEnvironment<T>(
@@ -1655,15 +1662,13 @@ struct GatewayProcessManagerTests {
 
     @Test(arguments: [false, true])
     func `readiness without a service record uses actual installation evidence`(_ installed: Bool) async throws {
-        let root = try makeTempDirForTests()
-        defer { try? FileManager.default.removeItem(at: root) }
         let port = try self.availableGatewayPort()
         let url = try #require(URL(string: "ws://example.invalid"))
         let (_, connection, manager) = self.makeGatewayReadinessFixture(url: url) {
             self.gatewayTask(healthSucceedsAfter: 0)
         }
         defer { manager.setTestingDesiredActive(false) }
-        try await self.withLaunchAgentEnvironment(port: port, homeDirectory: root) {
+        try await self.withLaunchAgentEnvironment(port: port) {
             manager.setTestingStatus(.starting)
             manager._testBeginGatewayStartGeneration()
             try #require(GatewayLaunchAgentManager.launchdProgramArguments() == [])
@@ -1717,6 +1722,8 @@ struct GatewayProcessManagerTests {
         }
         defer { manager.setTestingDesiredActive(false) }
         try await self.withLaunchAgentEnvironment(port: port) {
+            let hasNoServiceRecord = GatewayLaunchAgentManager.launchdProgramArguments() == []
+            try #require(hasNoServiceRecord)
             #expect(await manager._testAttachExistingGatewayIfAvailable(port: port))
             #expect(manager.installation == .external)
 

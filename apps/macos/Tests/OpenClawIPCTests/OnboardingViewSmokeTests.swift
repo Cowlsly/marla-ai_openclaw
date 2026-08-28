@@ -41,6 +41,7 @@ struct OnboardingViewSmokeTests {
         "external-service",
         "unreadable",
         "fresh",
+        "fresh-recommended",
     ])
     func `onboarding installs only for an app-managed local Gateway`(_ scenario: String) async throws {
         let root = try makeTempDirForTests()
@@ -87,13 +88,22 @@ struct OnboardingViewSmokeTests {
             }
             let state = AppState(preview: true)
             state.onboardingSeen = false
-            state.connectionMode = scenario == "remote" ? .remote : .local
+            state.connectionMode = switch scenario {
+            case "remote": .remote
+            case "fresh-recommended": .unconfigured
+            default: .local
+            }
             let view = OnboardingView(state: state)
-            let requiresSetup = managedAttachment || ["unreadable", "fresh"].contains(scenario)
+            let requiresSetup = managedAttachment || ["unreadable", "fresh", "fresh-recommended"].contains(scenario)
 
             #expect(!view.cliInstalled)
             try #require(view.pageOrder == (requiresSetup ? [0, 1, 2, 3] : [0, 1, 3]))
             #expect(view.activePageIndex(for: 2) == (requiresSetup ? view.cliPageIndex : view.aiPageIndex))
+            if scenario == "fresh-recommended" {
+                #expect(view.selectedConnectionMode == .local)
+                #expect(view.isConnectionSelectionBlocking)
+                #expect(state.connectionMode == .unconfigured)
+            }
             if !requiresSetup {
                 await view.runCLIInstall()
                 #expect(OnboardingController.shared.busyReason == nil)
@@ -208,18 +218,6 @@ struct OnboardingViewSmokeTests {
             requiresCLIInstall: false)
 
         #expect(!order.contains(2))
-    }
-
-    @Test func `fresh onboarding defaults to this Mac`() {
-        let state = AppState(preview: true)
-        state.onboardingSeen = false
-        state.connectionMode = .unconfigured
-        let view = OnboardingView(state: state)
-
-        #expect(view.selectedConnectionMode == .local)
-        #expect(view.isConnectionSelectionBlocking)
-        #expect(view.pageOrder == [0, 1, 2, 3])
-        #expect(state.connectionMode == .unconfigured)
     }
 
     @Test func `reopened onboarding preserves configure later selection`() {

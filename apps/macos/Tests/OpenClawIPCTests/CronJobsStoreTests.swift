@@ -64,7 +64,8 @@ private final class CronGatewayFixture: @unchecked Sendable {
     init(
         recoveryEligible: Bool = false,
         initialRunsFailure: (any Error & Sendable)? = nil,
-        holdJobList: Bool = false)
+        holdJobList: Bool = false,
+        onRequestRecorded: (@Sendable () -> Void)? = nil)
     {
         let requests = CronGatewayRequestLog()
         self.requests = requests
@@ -74,6 +75,7 @@ private final class CronGatewayFixture: @unchecked Sendable {
                       let request = Self.decodeRequest(message)
                 else { return }
                 await requests.append(request)
+                onRequestRecorded?()
                 guard request.method != "cron.runs" else {
                     if let initialRunsFailure,
                        await requests.requestCount(method: "cron.runs") == 1
@@ -204,25 +206,47 @@ private final class CronGatewayFixture: @unchecked Sendable {
 struct CronJobsStoreTests {
     @Test(arguments: [false, true])
     func `stopping the pane rejects a late job list completion`(succeeds: Bool) async throws {
-        let fixture = CronGatewayFixture(holdJobList: true)
+        let (arrivals, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let fixture = CronGatewayFixture(holdJobList: true, onRequestRecorded: { signal.yield(()) })
         let store = CronJobsStore(gateway: fixture.gateway)
-        let refresh = Task { await store.refreshJobs() }
-        let pending = try #require(await fixture.waitForRequest(method: "cron.list"))
-
-        store.stop()
-        store.lastError = "current pane error"
-        if succeeds {
-            try await fixture.respondWithJobs(to: pending)
-        } else {
-            try await fixture.fail(pending, message: "stopped pane failure")
+        let refresh = Task {
+            defer { signal.finish() }
+            await store.refreshJobs()
         }
-        await refresh.value
+        func cleanup() async {
+            store.stop()
+            refresh.cancel()
+            signal.finish()
+            await refresh.value
+            await fixture.gateway.shutdown()
+        }
+        do {
+            var recorded: CronGatewayRequest?
+            for await _ in arrivals {
+                recorded = await fixture.requests.request(method: "cron.list", jobId: nil)
+                if recorded != nil { break }
+            }
+            let pending = try #require(recorded, "refresh ended before cron.list arrived")
+            // A buffered request can outlive its refresh; stop must still precede completion.
+            try #require(store.isLoadingJobs)
+            store.stop()
+            store.lastError = "current pane error"
+            if succeeds {
+                try await fixture.respondWithJobs(to: pending)
+            } else {
+                try await fixture.fail(pending, message: "stopped pane failure")
+            }
+            await refresh.value
 
-        #expect(store.lastError == "current pane error")
-        #expect(store.jobs.isEmpty)
-        #expect(store.schedulerEnabled == nil)
-        #expect(!store.isLoadingJobs)
-        await fixture.gateway.shutdown()
+            #expect(store.lastError == "current pane error")
+            #expect(store.jobs.isEmpty)
+            #expect(store.schedulerEnabled == nil)
+            #expect(!store.isLoadingJobs)
+        } catch {
+            await cleanup()
+            throw error
+        }
+        await cleanup()
     }
 
     @Test func `selecting another job sends its history request while the previous request is pending`() async throws {
