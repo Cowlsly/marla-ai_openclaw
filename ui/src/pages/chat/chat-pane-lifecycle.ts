@@ -55,10 +55,13 @@ import {
   subscribeChatPaneSnapshotInvalidation,
   subscribeChatPaneStartup,
 } from "./chat-pane-startup-subscriptions.ts";
-import { applySelectedChatAgent } from "./chat-session.ts";
 import { handlePageGatewayEvent } from "./chat-state-events.ts";
 import { createPageState } from "./chat-state-page.ts";
-import { refreshPageChat, retireChatMetadataRequests } from "./chat-state-refresh.ts";
+import {
+  applySelectedChatAgent,
+  refreshPageChat,
+  retireChatMetadataRequests,
+} from "./chat-state-refresh.ts";
 import { resetChatViewState } from "./chat-view-state.ts";
 import { dismissConfirmedActionPopovers } from "./components/chat-message.ts";
 import { clearChatModelSearchOnEscape } from "./components/chat-model-picker.ts";

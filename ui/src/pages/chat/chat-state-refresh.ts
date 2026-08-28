@@ -11,7 +11,10 @@ import { formatUiError } from "../../lib/format-error.ts";
 import { loadModelAuthStatus } from "../../lib/model-auth.ts";
 import { loadModelCatalog } from "../../lib/model-catalog-store.ts";
 import { isSessionRunActive } from "../../lib/session-run-state.ts";
-import { areUiSessionKeysEquivalent } from "../../lib/sessions/session-key.ts";
+import {
+  areUiSessionKeysEquivalent,
+  isUiSelectedGlobalSessionKey,
+} from "../../lib/sessions/session-key.ts";
 import { refreshChatAvatar, resolveAgentIdForSession } from "./chat-avatar.ts";
 import { applyRemoteSlashCommandsResult, refreshSlashCommands } from "./chat-commands.ts";
 import { loadChatHistory, type ChatHistoryResult } from "./chat-history.ts";
@@ -19,6 +22,7 @@ import { flushChatQueueForEvent } from "./chat-send-actions.ts";
 import {
   flushChatQueueAfterIdleSessionReconciliation,
   refreshCurrentChatSessionList,
+  retireChatModelSelectionOwnership,
 } from "./chat-session.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import { resolveChatAgentId } from "./chat-state-route.ts";
@@ -71,7 +75,27 @@ export async function refreshChatCommands(host: ChatPageHost) {
   await refreshSlashCommands({
     client: host.client,
     agentId: resolveChatAgentId(host),
+    sessionKey: host.sessionKey,
   });
+}
+
+export function applySelectedChatAgent(
+  host: ChatPageHost | null | undefined,
+  selectedAgentId: string | null,
+): void {
+  if (
+    !host ||
+    !isUiSelectedGlobalSessionKey(host, host.sessionKey) ||
+    (host.assistantAgentId ?? null) === selectedAgentId
+  ) {
+    return;
+  }
+  retireChatModelSelectionOwnership(host);
+  host.assistantAgentId = selectedAgentId;
+  // Global chats retain their session key across agent selection. Replace the binding now;
+  // its old agent fence correctly rejects later invalidations and cannot initiate recovery.
+  void refreshChatMetadata(host);
+  host.requestUpdate?.();
 }
 
 function applyChatMetadataResult(
