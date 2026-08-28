@@ -235,6 +235,7 @@ export function createGatewayAuxHandlers(
       } catch (error) {
         params.log.error?.(`plugin approvals: authority-close settlement failed: ${String(error)}`);
       }
+      questionManager.cancelClosedAuthorities();
       params.onAgentRunAuthorityClosed?.(authority);
     },
   );
@@ -260,6 +261,7 @@ export function createGatewayAuxHandlers(
       } catch (error) {
         params.log.error?.(`plugin approvals: worker-claim settlement failed: ${String(error)}`);
       }
+      questionManager.cancelClosedAuthorities();
     },
   );
   const unregisterApprovalAuthorityObserver = () => {
