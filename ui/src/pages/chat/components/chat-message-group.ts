@@ -22,6 +22,7 @@ import { extractToolCardsCached } from "../../../lib/chat/tool-cards.ts";
 import type { EmbedSandboxMode } from "../../../lib/chat/tool-display.ts";
 import { fnv1aUtf16 } from "../../../lib/fnv1a.ts";
 import { resolveIdentityHue } from "../../../lib/identity-avatar.ts";
+import { parseAgentSessionKey } from "../../../lib/sessions/session-key.ts";
 import { renderChatAvatar } from "../chat-avatar.ts";
 import type { TurnRecap } from "../chat-progress.ts";
 import {
@@ -441,6 +442,11 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
     normalizedRole === "assistant" &&
     (Boolean(group.senderSession) || assistantGroupIsForwardedBoundary(group));
   const sourceSessionKey = group.senderSession?.sessionKey;
+  // Only agent-prefixed keys are navigable: the titler, hovercard, and click
+  // handlers all reject other shapes, so a legacy key must stay plain text
+  // instead of becoming a focusable link that goes nowhere.
+  const linkableSourceKey =
+    sourceSessionKey && parseAgentSessionKey(sourceSessionKey) ? sourceSessionKey : undefined;
   const who = resolveMessageGroupSenderLabel(group, opts);
   const roleClass =
     normalizedRole === "user"
@@ -587,7 +593,7 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
                 <span class="chat-forwarded-attribution__icon" aria-hidden="true"
                   >${icons.forward}</span
                 >
-                ${sourceSessionKey
+                ${linkableSourceKey
                   ? // The titler owns child text (.textContent keeps Lit's part
                     // out of it). A rendered group's source never changes:
                     // messages are immutable and grouping splits on
@@ -597,16 +603,19 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
                         class="markdown-session-link"
                         role="link"
                         tabindex="0"
-                        data-session-key=${sourceSessionKey}
-                        .textContent=${sourceSessionKey}
+                        data-session-key=${linkableSourceKey}
+                        .textContent=${linkableSourceKey}
                       ></a>`
-                  : html`<span
-                      >${group.senderSession?.agentId
-                        ? t("chat.messages.forwardedFromAgent", {
-                            agentId: group.senderSession.agentId,
-                          })
-                        : t("chat.messages.forwardedMessage")}</span
-                    >`}
+                  : sourceSessionKey
+                    ? html`<span>${t("chat.messages.forwardedFrom")}</span>
+                        <span>${sourceSessionKey}</span>`
+                    : html`<span
+                        >${group.senderSession?.agentId
+                          ? t("chat.messages.forwardedFromAgent", {
+                              agentId: group.senderSession.agentId,
+                            })
+                          : t("chat.messages.forwardedMessage")}</span
+                      >`}
               </div>
             `
           : nothing}
