@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -101,10 +102,9 @@ if (failure) {
   console.error(failure);
   process.exit(1);
 }
-if (state.mode === "slow-delete" && args[3] === "delete") {
-  const timer = setInterval(() => {
-    if (fs.existsSync(stateFile + ".release")) clearInterval(timer);
-  }, 10);
+if ((state.mode === "slow-delete" && args[3] === "delete") ||
+    (state.mode === "stuck" && state.observations > 0)) {
+  fs.writeFileSync(stateFile + ".expired", "");
 }
 `,
     { mode: 0o755 },
@@ -118,7 +118,7 @@ if (state.mode === "slow-delete" && args[3] === "delete") {
         sandboxNames: ["first", "second", "never-created"],
       }),
     read: async () => JSON.parse(await fs.readFile(stateFile, "utf8")) as typeof initial,
-    release: () => fs.writeFile(stateFile + ".release", ""),
+    deadlineExpired: () => existsSync(stateFile + ".expired"),
     dispose: () => fs.rm(root, { recursive: true, force: true }),
   };
 }
@@ -201,32 +201,26 @@ describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () =
 
   it.each(["slow-delete", "stuck"])("bounds %s by the original cleanup deadline", async (mode) => {
     const fixture = await createCleanupFixture({ mode });
-    vi.useFakeTimers({ toFake: ["Date"] });
-    const result = fixture.cleanup().catch((error: unknown) => error);
+    const startedAt = Date.now();
+    // Advance at the real child operation boundary, not a wall-clock poll that
+    // can expire before a loaded host starts the command.
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => startedAt + (fixture.deadlineExpired() ? 120_000 : 0));
     try {
-      await vi.waitFor(async () => {
-        const state = await fixture.read();
-        expect(mode === "slow-delete" ? state.deletes.length : state.observations).toBeGreaterThan(
-          0,
-        );
-      });
-      const { listCalls } = await fixture.read();
-      vi.advanceTimersByTime(120_000);
-      await fixture.release();
-      const failure = await result;
+      const failure = await fixture.cleanup().catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(AggregateError);
       expect((failure as AggregateError).errors).toContainEqual(
         expect.objectContaining({ message: expect.stringContaining("120 seconds") }),
       );
       expect(await fixture.read()).toMatchObject({
-        listCalls,
+        listCalls: mode === "slow-delete" ? 1 : 2,
         deletes: ["first"],
+        observations: mode === "slow-delete" ? 0 : 1,
         workspaceDeletes: 0,
       });
     } finally {
-      await fixture.release();
-      await result;
-      vi.useRealTimers();
+      clock.mockRestore();
       await fixture.dispose();
     }
   });
