@@ -13,6 +13,49 @@ type ExecResult = {
   stderr: string;
 };
 
+export function buildOpenShellPolicyYaml(params: {
+  port: number;
+  binaryPath: string;
+  hostIp?: string;
+}): string {
+  const hostIp = params.hostIp?.trim();
+  // An explicit override keeps its shipped single-/32 policy; only the default
+  // uses NVIDIA's host_gateway_alias.rs ranges across managed Docker bridges.
+  // Upstream's 172.0.0.0/8 intentionally extends beyond RFC1918.
+  const allowedIps = hostIp
+    ? [`${hostIp}/32`]
+    : ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16", "fc00::/7"];
+  const networkPolicies = `  host_echo:
+    name: host-echo
+    endpoints:
+      - host: host.openshell.internal
+        port: ${params.port}
+        protocol: rest
+        enforcement: enforce
+        access: full
+        allowed_ips:
+${allowedIps.map((ip) => `          - "${ip}"`).join("\n")}
+    binaries:
+      - path: ${params.binaryPath}`;
+  return `version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt]
+  read_write: [/sandbox, /tmp, /dev/null]
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+${networkPolicies}
+`;
+}
+
 export async function runCommand(params: {
   command: string;
   args: string[];

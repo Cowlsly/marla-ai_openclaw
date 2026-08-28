@@ -11,6 +11,7 @@ import {
 } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it } from "vitest";
 import {
+  buildOpenShellPolicyYaml,
   cleanupOpenShellWorkspace,
   runCommand,
   runBackendExec,
@@ -30,6 +31,7 @@ const OPENCLAW_OPENSHELL_COMMAND =
   process.env.OPENCLAW_E2E_OPENSHELL_COMMAND?.trim() || "openshell";
 const OPENCLAW_OPENSHELL_CONFIG_HOME =
   process.env.OPENCLAW_E2E_OPENSHELL_CONFIG_HOME?.trim() || null;
+const OPENCLAW_OPENSHELL_HOST_IP = process.env.OPENCLAW_E2E_OPENSHELL_HOST_IP;
 
 const CUSTOM_IMAGE_DOCKERFILE = `FROM python:3.13-slim
 
@@ -271,43 +273,6 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
     timeoutMs: 30_000,
   });
   throw new Error("docker-backed host policy server did not become ready");
-}
-
-function buildOpenShellPolicyYaml(params: { port: number; binaryPath: string }): string {
-  // Match NVIDIA's host_gateway_alias.rs fixture across managed Docker bridges.
-  // Its 172.0.0.0/8 range is intentionally broader than RFC1918.
-  const networkPolicies = `  host_echo:
-    name: host-echo
-    endpoints:
-      - host: host.openshell.internal
-        port: ${params.port}
-        protocol: rest
-        enforcement: enforce
-        access: full
-        allowed_ips:
-          - "10.0.0.0/8"
-          - "172.0.0.0/8"
-          - "192.168.0.0/16"
-          - "fc00::/7"
-    binaries:
-      - path: ${params.binaryPath}`;
-  return `version: 1
-
-filesystem_policy:
-  include_workdir: true
-  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt]
-  read_write: [/sandbox, /tmp, /dev/null]
-
-landlock:
-  compatibility: best_effort
-
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-
-network_policies:
-${networkPolicies}
-`;
 }
 
 describe("OpenShell gateway discovery", () => {
@@ -566,6 +531,7 @@ describe("openshell sandbox backend e2e", () => {
           buildOpenShellPolicyYaml({
             port: hostPolicyServer.port,
             binaryPath: "/usr/bin/false",
+            hostIp: OPENCLAW_OPENSHELL_HOST_IP,
           }),
           "utf8",
         );
@@ -574,6 +540,7 @@ describe("openshell sandbox backend e2e", () => {
           buildOpenShellPolicyYaml({
             port: hostPolicyServer.port,
             binaryPath: "/usr/bin/curl",
+            hostIp: OPENCLAW_OPENSHELL_HOST_IP,
           }),
           "utf8",
         );

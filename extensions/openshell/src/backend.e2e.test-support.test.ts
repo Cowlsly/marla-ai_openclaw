@@ -2,7 +2,42 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { cleanupOpenShellWorkspace, runCommand } from "./backend.e2e.test-support.js";
+import { parse } from "yaml";
+import {
+  buildOpenShellPolicyYaml,
+  cleanupOpenShellWorkspace,
+  runCommand,
+} from "./backend.e2e.test-support.js";
+
+describe("OpenShell host policy", () => {
+  const defaults = ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16", "fc00::/7"];
+  it.each([
+    { name: "default", hostIp: undefined, allowedIps: defaults },
+    { name: "blank override", hostIp: "  ", allowedIps: defaults },
+    { name: "custom IPv4 override", hostIp: " 198.51.100.42 ", allowedIps: ["198.51.100.42/32"] },
+    { name: "shipped IPv6 override", hostIp: "2001:db8::1", allowedIps: ["2001:db8::1/32"] },
+  ])("preserves $name without changing the endpoint or binary", ({ hostIp, allowedIps }) => {
+    const params = { port: 17680, binaryPath: "/usr/bin/curl", hostIp };
+    const policy: unknown = parse(buildOpenShellPolicyYaml(params));
+    expect(policy).toMatchObject({
+      network_policies: {
+        host_echo: {
+          endpoints: [
+            {
+              host: "host.openshell.internal",
+              port: 17680,
+              protocol: "rest",
+              enforcement: "enforce",
+              access: "full",
+              allowed_ips: allowedIps,
+            },
+          ],
+          binaries: [{ path: "/usr/bin/curl" }],
+        },
+      },
+    });
+  });
+});
 
 it.runIf(process.platform !== "win32")("reports a signal-killed probe as failure", async () => {
   const result = await runCommand({
