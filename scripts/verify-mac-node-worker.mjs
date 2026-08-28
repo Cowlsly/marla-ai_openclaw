@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   seedMacNodeWorkerProofState,
   readMacNodeWorkerProofRows,
@@ -118,20 +118,17 @@ try {
   // Ready manifests do not load lazy native capabilities. Exercise their real
   // package loaders so omitted optional packages and wrong slices fail staging.
   const require = createRequire(path.join(packageRoot, "package.json"));
-  const { configureFsSafeNative } = await import(
-    pathToFileURL(require.resolve("@openclaw/fs-safe/config")).href
+  // Keep required native mode and bundled module identity in a fresh process;
+  // worker readiness below must still use OpenClaw's normal defaults.
+  execFileSync(
+    node,
+    [fileURLToPath(new URL("./verify-mac-node-worker-fs.mjs", import.meta.url)), packageRoot, home],
+    {
+      cwd: home,
+      env: { HOME: home, TMPDIR: home, FS_SAFE_NATIVE_MODE: "require" },
+      stdio: "inherit",
+    },
   );
-  const { sha256File } = await import(
-    pathToFileURL(require.resolve("@openclaw/fs-safe/durability")).href
-  );
-  configureFsSafeNative({ mode: "require" });
-  const proofFile = path.join(home, "native-proof");
-  const content = "bundled worker native proof\n";
-  fs.writeFileSync(proofFile, content);
-  assert.deepEqual(await sha256File(proofFile), {
-    bytes: Buffer.byteLength(content),
-    digest: createHash("sha256").update(content).digest("hex"),
-  });
   const database = new DatabaseSync(":memory:", { allowExtension: true });
   try {
     require("sqlite-vec").load(database);
