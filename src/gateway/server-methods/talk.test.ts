@@ -73,6 +73,8 @@ const mocks = vi.hoisted(() => ({
   stopTalkTranscriptionRelaySession: vi.fn(),
   chatSend: vi.fn(),
   controlRealtimeVoiceAgentRun: vi.fn(),
+  injectionTarget: {},
+  resolveEmbeddedAgentMessageInjectionTarget: vi.fn(),
   steerTalkRealtimeRelayAgentRun: vi.fn(),
   resolveSessionKeyFromResolveParams: vi.fn(),
   resolveRealtimeBootstrapContextInstructions: vi.fn(
@@ -157,6 +159,12 @@ vi.mock("../../talk/provider-internal.js", async (importOriginal) => {
 
 vi.mock("../../talk/agent-run-control.js", () => ({
   controlRealtimeVoiceAgentRun: mocks.controlRealtimeVoiceAgentRun,
+  controlOwnedRealtimeVoiceAgentRun: mocks.controlRealtimeVoiceAgentRun,
+}));
+
+vi.mock("../../agents/embedded-agent-runner/runs.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../agents/embedded-agent-runner/runs.js")>()),
+  resolveEmbeddedAgentMessageInjectionTarget: mocks.resolveEmbeddedAgentMessageInjectionTarget,
 }));
 
 vi.mock("../../talk/agent-consult-runtime.js", async (importOriginal) => {
@@ -2945,6 +2953,7 @@ describe("talk.client.steer handler", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.resolveEmbeddedAgentMessageInjectionTarget.mockReturnValue(mocks.injectionTarget);
     mocks.controlRealtimeVoiceAgentRun.mockResolvedValue({
       ok: true,
       mode: "steer",
@@ -2972,11 +2981,14 @@ describe("talk.client.steer handler", () => {
       context: createSteerContext(),
     });
 
-    expect(mocks.controlRealtimeVoiceAgentRun).toHaveBeenCalledWith({
-      sessionKey: "agent:main:main",
-      text: "use the safer plan",
-      mode: "steer",
-    });
+    expect(mocks.controlRealtimeVoiceAgentRun).toHaveBeenCalledWith(
+      {
+        sessionKey: "agent:main:main",
+        text: "use the safer plan",
+        mode: "steer",
+      },
+      mocks.injectionTarget,
+    );
     expectRespondOk(respond, {
       ok: true,
       mode: "steer",
@@ -3476,11 +3488,14 @@ describe("talk.client.create handler", () => {
       respond: steerRespond,
       context,
     });
-    expect(mocks.controlRealtimeVoiceAgentRun).toHaveBeenCalledWith({
-      sessionKey: "main",
-      text: "Use the safer plan",
-      mode: "steer",
-    });
+    expect(mocks.controlRealtimeVoiceAgentRun).toHaveBeenCalledWith(
+      {
+        sessionKey: "main",
+        text: "Use the safer plan",
+        mode: "steer",
+      },
+      mocks.injectionTarget,
+    );
     expectRespondOk(steerRespond, { ok: true, mode: "steer" });
 
     release.resolve();

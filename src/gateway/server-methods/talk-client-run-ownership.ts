@@ -1,20 +1,30 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import {
+  resolveEmbeddedAgentMessageInjectionTarget,
+  type EmbeddedAgentMessageInjectionTarget,
+} from "../../agents/embedded-agent-runner/runs.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
-export function hasOwnedActiveTalkClientRun(params: {
+export function resolveOwnedActiveTalkClientInjectionTarget(params: {
   context: Parameters<GatewayRequestHandlers[string]>[0]["context"];
   clientConnId?: string;
   sessionKey: string;
-}): boolean {
+}): EmbeddedAgentMessageInjectionTarget | undefined {
   const connId = normalizeOptionalString(params.clientConnId);
   const sessionKey = params.sessionKey.trim();
   if (!connId || !sessionKey) {
-    return false;
+    return undefined;
   }
-  for (const entry of params.context.chatAbortControllers.values()) {
+  for (const [runId, entry] of params.context.chatAbortControllers) {
     if (entry.sessionKey === sessionKey && entry.ownerConnId === connId && entry.kind !== "agent") {
-      return true;
+      const target = resolveEmbeddedAgentMessageInjectionTarget({
+        runId,
+        sessionId: entry.sessionId,
+      });
+      if (target) {
+        return target;
+      }
     }
   }
-  return false;
+  return undefined;
 }

@@ -11,8 +11,10 @@ import {
   clearActiveEmbeddedRun,
   formatEmbeddedAgentQueueFailureSummary,
   preemptAndDrainEmbeddedHeartbeatRun,
+  queueEmbeddedAgentMessageInjectionTarget,
   queueEmbeddedAgentMessageWithOutcome,
   queueEmbeddedAgentMessageWithOutcomeAsync,
+  resolveEmbeddedAgentMessageInjectionTarget,
   setActiveEmbeddedRun,
   type EmbeddedAgentQueueHandle,
 } from "./runs.js";
@@ -25,6 +27,45 @@ describe("embedded-agent active-run steering", () => {
     resetDiagnosticSessionStateForTest();
     setDiagnosticsEnabledForProcess(false);
     vi.restoreAllMocks();
+  });
+
+  it("projects authority only into the exact captured run", async () => {
+    const firstQueue = vi.fn(async () => {});
+    const first = createEmbeddedRunHandle({ queueMessage: firstQueue });
+    Object.assign(first, { runId: "run-first", toolAuthorityFingerprint: "authority-first" });
+    setActiveEmbeddedRun("session-talk", first, "agent:main:main");
+    const target = resolveEmbeddedAgentMessageInjectionTarget({
+      sessionId: "session-talk",
+      runId: "run-first",
+    });
+    expect(target).toBeDefined();
+
+    await expect(
+      queueEmbeddedAgentMessageInjectionTarget(target!, "steer", {
+        isInboundUserMessage: true,
+        steeringMode: "all",
+      }),
+    ).resolves.toMatchObject({ queued: true });
+    expect(firstQueue).toHaveBeenCalledWith("steer", {
+      isInboundUserMessage: true,
+      steeringMode: "all",
+      toolAuthorityFingerprint: "authority-first",
+    });
+
+    const replacementQueue = vi.fn(async () => {});
+    const replacement = createEmbeddedRunHandle({ queueMessage: replacementQueue });
+    Object.assign(replacement, {
+      runId: "run-replacement",
+      toolAuthorityFingerprint: "authority-replacement",
+    });
+    setActiveEmbeddedRun("session-talk", replacement, "agent:main:main");
+
+    await expect(
+      queueEmbeddedAgentMessageInjectionTarget(target!, "stale steer", {
+        isInboundUserMessage: true,
+      }),
+    ).resolves.toMatchObject({ queued: false, reason: "tool_authority_mismatch" });
+    expect(replacementQueue).not.toHaveBeenCalled();
   });
 
   it("aborts and drains the exact heartbeat handle through session replacement", async () => {

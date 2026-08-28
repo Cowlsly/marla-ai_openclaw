@@ -13,6 +13,10 @@ import { buildAgentMainSessionKey } from "../../routing/session-key.js";
 import { assertSecretOwnerAvailable } from "../../secrets/runtime-degraded-state.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL } from "../../talk/agent-consult-tool.js";
 import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-shared.js";
+import {
+  controlOwnedRealtimeVoiceAgentRun,
+  controlRealtimeVoiceAgentRun,
+} from "../../talk/agent-run-control.js";
 import { resolveTalkSessionAgentId } from "../../talk/agent-target.js";
 import {
   appendClientVoiceTranscript,
@@ -45,6 +49,7 @@ import {
 } from "../talk-client-gateway-control.js";
 import { formatForLog } from "../ws-log.js";
 import { rememberLegacyVoiceBinding } from "./talk-client-legacy-voice-bindings.js";
+import { resolveOwnedActiveTalkClientInjectionTarget } from "./talk-client-run-ownership.js";
 import {
   buildRealtimeInstructions,
   buildRealtimeVoiceLaunchOptions,
@@ -254,6 +259,16 @@ export const createTalkClient: GatewayRequestHandler = async ({
             connId: ownerConnId!,
             context,
             runAgentConsult: consultRunner.runArgs,
+            controlAgentRun: async (controlParams) => {
+              const target = resolveOwnedActiveTalkClientInjectionTarget({
+                context,
+                clientConnId: ownerConnId,
+                sessionKey,
+              });
+              return target
+                ? await controlOwnedRealtimeVoiceAgentRun(controlParams, target)
+                : await controlRealtimeVoiceAgentRun(controlParams);
+            },
             appendTranscript: ({ entryId, role, text }) =>
               appendClientVoiceTranscript({
                 agentId,

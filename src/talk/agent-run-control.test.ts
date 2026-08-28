@@ -44,6 +44,7 @@ function createDeps(options: {
               enqueuedAtMs: 123,
             },
     ),
+    queueEmbeddedAgentMessageInjectionTarget: vi.fn(),
     getDiagnosticSessionActivitySnapshot: vi.fn(() => options.activity ?? {}),
     resolveActiveEmbeddedRunSessionId: vi.fn(() => options.activeSessionId),
   };
