@@ -287,6 +287,7 @@ describe("embedded run retry dispatch", () => {
         sessionKey: input.runtime.sessionKey,
         sessionFile: input.runtime.sessionFile,
         abortSignal: operation.abortSignal,
+        replyOperation: operation,
       });
       const onDeferredLifecycleAbort = vi.fn(manager.abort);
       input.params.replyOperation = operation;
