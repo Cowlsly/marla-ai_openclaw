@@ -10,6 +10,7 @@ import {
   shouldSkipSparseTsgoGuardError,
 } from "../../scripts/lib/tsgo-sparse-guard.mts";
 import { resolveTsgoTimeoutMs } from "../../scripts/run-tsgo.mts";
+import { createBoundedChildOutput } from "../helpers/bounded-child-output.js";
 import {
   isProcessAlive,
   waitForChildClose,
@@ -365,10 +366,16 @@ child.once("message", () => process.exit(0));
         .toEqual([]);
     } finally {
       for (const pidFile of [descendantPidPath, path.join(cwd, "fake-tsgo.pid")]) {
-        if (!fs.existsSync(pidFile)) continue;
+        if (!fs.existsSync(pidFile)) {
+          continue;
+        }
         const pid = Number(fs.readFileSync(pidFile, "utf8"));
-        if (!Number.isSafeInteger(pid) || pid <= 1) continue;
-        if (isProcessAlive(pid)) process.kill(pid, "SIGKILL");
+        if (!Number.isSafeInteger(pid) || pid <= 1) {
+          continue;
+        }
+        if (isProcessAlive(pid)) {
+          process.kill(pid, "SIGKILL");
+        }
         await waitForDead(pid, 2_000);
       }
     }
@@ -466,13 +473,16 @@ syncBuiltinESMExports();
         [path.resolve("scripts/run-tsgo.mjs"), "-p", "tsconfig.extensions.json"],
         {
           cwd,
-          stdio: "ignore",
+          stdio: ["ignore", "ignore", "pipe"],
           env: {
             ...process.env,
             NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""}${phase === "spawn" ? ` --import=${pathToFileURL(preloadPath).href}` : ""}`,
           },
         },
       );
+      const stderr = createBoundedChildOutput();
+      wrapper.stderr.on("data", (chunk) => stderr.append(chunk));
+      wrapper.once("error", (error) => stderr.append(`wrapper spawn error: ${error.message}\n`));
       const wrapperClose = waitForChildClose(wrapper, 15_000);
 
       try {
@@ -487,6 +497,11 @@ syncBuiltinESMExports();
           { code: null, signal: "SIGTERM" },
         ]).toContainEqual(wrapperResult);
         await expect(waitForDead(compilerPid, 2_000)).resolves.toBeUndefined();
+      } catch (error) {
+        throw new Error(
+          `${String(error)}\nwrapper exitCode=${wrapper.exitCode}, signalCode=${wrapper.signalCode}\n${stderr.text()}`,
+          { cause: error },
+        );
       } finally {
         if (wrapper.exitCode === null && wrapper.signalCode === null) {
           wrapper.kill("SIGKILL");
