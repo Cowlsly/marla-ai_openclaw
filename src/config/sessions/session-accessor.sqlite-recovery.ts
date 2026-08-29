@@ -29,7 +29,7 @@ import {
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
-import type { SessionCreatedActor } from "./session-entry-provenance.js";
+import type { SessionActor } from "./session-entry-provenance.js";
 import { createSessionTranscriptHeader } from "./transcript-header.js";
 import type { InternalSessionEntry, SessionEntry } from "./types.js";
 
@@ -56,7 +56,7 @@ export type RestartTombstoneRecoveryResult =
  */
 export async function recoverSessionEntryFromRestartTombstone(params: {
   agentId: string;
-  archivedBy?: SessionCreatedActor;
+  archivedBy?: SessionActor;
   expected: {
     cycleId: string;
     lifecycleRevision?: string;

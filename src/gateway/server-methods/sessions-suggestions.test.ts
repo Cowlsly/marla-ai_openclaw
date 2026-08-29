@@ -38,7 +38,7 @@ describe("session suggestion handlers", () => {
         {
           sessionId: "session-ops-global",
           updatedAt: 1,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "suggest",
         },
       );
@@ -84,7 +84,7 @@ describe("session suggestion handlers", () => {
         {
           sessionId: "session-ops-global",
           updatedAt: 1,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "suggest",
         },
       );
@@ -129,7 +129,7 @@ describe("session suggestion handlers", () => {
           sessionId: "session-archived",
           updatedAt: 1,
           archivedAt: 2,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "suggest",
         },
       );
@@ -463,7 +463,7 @@ describe("session suggestion handlers", () => {
         {
           sessionId: "session-main",
           updatedAt: 2,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "shared",
         },
       );
@@ -626,7 +626,7 @@ describe("session suggestion handlers", () => {
         {
           sessionId: "session-before-dispatch",
           updatedAt: 1,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "suggest",
         },
       );
@@ -654,7 +654,7 @@ describe("session suggestion handlers", () => {
         {
           sessionId: "session-after-dispatch",
           updatedAt: 2,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "suggest",
         },
       );
@@ -685,7 +685,7 @@ describe("session suggestion handlers", () => {
           {
             sessionId: "session-race",
             updatedAt: 1,
-            createdActor: { type: "human", id: "owner" },
+            createdActor: { type: "human", source: "profile", id: "owner" },
             visibility: "suggest",
           },
         );
@@ -740,7 +740,7 @@ describe("session suggestion handlers", () => {
         {
           sessionId: "session-release-failure",
           updatedAt: 1,
-          createdActor: { type: "human", id: "owner" },
+          createdActor: { type: "human", source: "profile", id: "owner" },
           visibility: "suggest",
         },
       );
