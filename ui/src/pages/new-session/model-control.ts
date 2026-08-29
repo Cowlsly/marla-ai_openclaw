@@ -357,16 +357,18 @@ export class NewSessionModelControl {
       this.agentId !== normalizedAgentId ||
       (this.metadataClient && this.metadataClient !== client)
     ) {
-      // Catalog availability belongs to an agent. A real owner change clears
-      // the snapshot; same-agent refreshes retain it until replacement.
+      // A new client retires availability, but draft choices belong to the agent.
+      // Gateway-owner changes clear those choices through invalidate(true).
       this.metadataLoading = false;
       this.clearMetadataSubscription();
+      if (this.agentId !== normalizedAgentId) {
+        this.selected = "";
+        this.contextWindow = "";
+        this.thinkingLevel = "";
+        this.fastMode = undefined;
+      }
       this.agentId = normalizedAgentId;
       this.metadataClient = undefined;
-      this.selected = "";
-      this.contextWindow = "";
-      this.thinkingLevel = "";
-      this.fastMode = undefined;
       this.metadataState = {
         catalog: [],
         hasSnapshot: false,
