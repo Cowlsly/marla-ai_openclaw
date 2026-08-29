@@ -930,25 +930,29 @@ class ChatControllerModelSelectionTest {
     }
 
   @Test
-  fun metadataChangeRetainsAvailabilityUntilAcceptedRefreshWithoutReloadingChat() =
+  fun metadataChangeRetainsSessionProfileAvailabilityUntilAcceptedRefreshWithoutReloadingChat() =
     runTest {
       val pendingRefresh = CompletableDeferred<String>()
+      val sessionKey = "agent:main:profile-locked"
       var metadataRequests = 0
       val (controller, requests) =
         chatControllerTestSetup {
           respond("chat.history", historyResponse("session-main", listOf(ReplayHistoryMessage("assistant", "Earlier reply", 1))))
-          respond("chat.metadata") {
+          respond("chat.metadata") { paramsJson ->
             metadataRequests += 1
-            when (metadataRequests) {
-              2 -> pendingRefresh.await()
-              4 -> availabilityMetadata(true)
+            val params = json.parseToJsonElement(paramsJson.orEmpty()) as JsonObject
+            // Neutral agent credentials work; this session's selected profile starts unavailable.
+            when {
+              (params["sessionKey"] as? JsonPrimitive)?.content != sessionKey -> availabilityMetadata(true)
+              metadataRequests == 2 -> pendingRefresh.await()
+              metadataRequests == 4 -> availabilityMetadata(true)
               else -> availabilityMetadata(false)
             }
           }
         }
-      controller.load("main")
+      controller.load(sessionKey)
       advanceUntilIdle()
-      assertTrue(controller.setSessionModelAwait("main", "openai/gpt-5.6-luna"))
+      assertTrue(controller.setSessionModelAwait(sessionKey, "openai/gpt-5.6-luna"))
       val messages = controller.messages.value
       val historyRequests = requests.count { it.first == "chat.history" }
       val sessionRequests = requests.count { it.first == "sessions.list" }
@@ -1048,9 +1052,9 @@ class ChatControllerModelSelectionTest {
     }
 
   @Test
-  fun metadataPublicationCannotCrossDisconnectOrAgentRoundTrip() =
+  fun metadataPublicationCannotCrossDisconnectOrSessionRoundTrip() =
     runTest {
-      for (disconnect in listOf(false, true)) {
+      for (transition in listOf("disconnect", "agent", "session")) {
         val oldRefresh = CompletableDeferred<String>()
         var metadataRequests = 0
         val controller =
@@ -1067,13 +1071,13 @@ class ChatControllerModelSelectionTest {
         runCurrent()
         assertEquals(2, metadataRequests)
 
-        if (disconnect) {
+        if (transition == "disconnect") {
           controller.onDisconnected("Offline")
           assertTrue(controller.modelCatalog.value.isEmpty())
           controller.handleGatewayEvent("health", null)
           runCurrent()
         } else {
-          controller.switchSession("agent:ops:main")
+          controller.switchSession(if (transition == "agent") "agent:ops:main" else "agent:main:other")
           runCurrent()
           controller.switchSession("main")
           runCurrent()

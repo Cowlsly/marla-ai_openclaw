@@ -80,6 +80,7 @@ describe("gateway chat metadata lifecycle", () => {
       typeof import("./server-methods/chat-metadata-runtime.js")
     >("./server-methods/chat-metadata-runtime.js");
     const owner: PreparedModelRuntimeSnapshot = {
+      catalogOwner: { agentId: "main", workspaceDir: "/tmp/metadata-lifecycle/workspace" },
       agentId: "main",
       agentDir: "/tmp/metadata-lifecycle/agent",
       workspaceDir: "/tmp/metadata-lifecycle/workspace",

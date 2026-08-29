@@ -625,7 +625,7 @@ class ChatController internal constructor(
 
   private var lastHealthPollAtMs: Long? = null
   private val chatMetadataRequestSequence = AtomicLong(0)
-  private var chatMetadataAgentId: String? = null
+  private var chatMetadataScope: Pair<String, String>? = null
   private var chatMetadataLoadState = ChatMetadataLoadState.Unloaded
   private var sessionsListArchived = false
 
@@ -714,7 +714,7 @@ class ChatController internal constructor(
     updateErrorText(null)
     _commands.value = emptyList()
     _modelCatalog.value = emptyList()
-    chatMetadataAgentId = null
+    chatMetadataScope = null
     chatMetadataLoadState = ChatMetadataLoadState.Unloaded
     disableSwarmProgress()
     clearLiveHistoryMarker()
@@ -856,7 +856,7 @@ class ChatController internal constructor(
       unreadPatchRequested = false
       _commands.value = emptyList()
       _modelCatalog.value = emptyList()
-      chatMetadataAgentId = null
+      chatMetadataScope = null
       chatMetadataLoadState = ChatMetadataLoadState.Unloaded
       lastHealthPollAtMs = null
       // Outbox rows are gateway-scoped too; the next publish repopulates them for the new scope.
@@ -2547,11 +2547,12 @@ class ChatController internal constructor(
         _selectedModelRef.value = null
         lastHandledTerminalRunId = null
         val nextAgentId = resolveAgentIdForSessionKey(key)
-        if (chatMetadataAgentId != nextAgentId) {
+        // Availability follows a session profile, including switches within the same agent.
+        if (chatMetadataScope != (nextAgentId to key)) {
           chatMetadataRequestSequence.incrementAndGet()
           _commands.value = emptyList()
           _modelCatalog.value = emptyList()
-          chatMetadataAgentId = null
+          chatMetadataScope = null
           chatMetadataLoadState = ChatMetadataLoadState.Unloaded
           disableSwarmProgress(key)
         }
@@ -4459,13 +4460,15 @@ class ChatController internal constructor(
   private suspend fun fetchChatMetadata(requestSequence: Long = chatMetadataRequestSequence.incrementAndGet()) {
     if (requestSequence != chatMetadataRequestSequence.get()) return
     val requestCacheScope = currentCacheScope()
-    val agentId = resolveAgentIdForSessionKey(_sessionKey.value) ?: return
+    val sessionKey = _sessionKey.value
+    val agentId = resolveAgentIdForSessionKey(sessionKey) ?: return
     var shouldRefreshSwarm = false
     var shouldDisableSwarm = false
     try {
       val params =
         buildJsonObject {
           put("agentId", JsonPrimitive(agentId))
+          put("sessionKey", JsonPrimitive(sessionKey))
         }
       val res = requestGatewayBound(requestCacheScope?.gatewayId, "chat.metadata", params.toString())
       val root = json.parseToJsonElement(res).asObjectOrNull()
@@ -4474,6 +4477,7 @@ class ChatController internal constructor(
         if (
           requestSequence == chatMetadataRequestSequence.get() &&
           requestCacheScope == currentCacheScope() &&
+          sessionKey == _sessionKey.value &&
           agentId == resolveAgentIdForSessionKey(_sessionKey.value)
         ) {
           _commands.value = parseChatCommands(json, res)
@@ -4487,7 +4491,7 @@ class ChatController internal constructor(
               chatMetadataLoadState == ChatMetadataLoadState.RetryEmptyCatalog -> ChatMetadataLoadState.Loaded
               else -> ChatMetadataLoadState.RetryEmptyCatalog
             }
-          chatMetadataAgentId = agentId
+          chatMetadataScope = agentId to sessionKey
           synchronized(swarmLock) { swarmEnabled = metadataSwarmEnabled }
           shouldRefreshSwarm = metadataSwarmEnabled
           shouldDisableSwarm = !metadataSwarmEnabled
@@ -4756,7 +4760,7 @@ class ChatController internal constructor(
 
   private fun hasCurrentChatMetadata(): Boolean {
     val activeAgentId = resolveAgentIdForSessionKey(_sessionKey.value) ?: return false
-    return chatMetadataLoadState == ChatMetadataLoadState.Loaded && chatMetadataAgentId == activeAgentId
+    return chatMetadataLoadState == ChatMetadataLoadState.Loaded && chatMetadataScope == (activeAgentId to _sessionKey.value)
   }
 
   private fun refreshCommandsAfterReconnect() {
