@@ -472,48 +472,73 @@ describe("AgentSession queue and next-turn lifecycle correctness", () => {
     expect(settled).toHaveBeenCalledOnce();
   });
 
-  it("keeps one logical prompt owner across an automatic retry gap", async () => {
-    vi.useFakeTimers();
-    try {
-      const requests: Context[] = [];
-      streamMocks.streamSimple.mockImplementation((activeModel: Model, context: Context) => {
-        requests.push(context);
-        if (requests.length === 1) {
-          return createAssistantResultStream({
-            ...createAssistant(activeModel, [], "error"),
-            errorMessage: "HTTP 503 temporary provider response",
-          });
+  it.each(["continue", "abort-queued", "abort-empty"] as const)(
+    "keeps one logical prompt owner across an automatic retry gap (%s)",
+    async (action) => {
+      vi.useFakeTimers();
+      let session: AgentSession | undefined;
+      let prompt: Promise<void> | undefined;
+      try {
+        const requests: Context[] = [];
+        streamMocks.streamSimple.mockImplementation((activeModel: Model, context: Context) => {
+          requests.push(context);
+          if (requests.length === 1) {
+            return createAssistantResultStream({
+              ...createAssistant(activeModel, [], "error"),
+              errorMessage: "HTTP 503 temporary provider response",
+            });
+          }
+          return createAssistantResultStream(
+            createAssistant(activeModel, [{ type: "text", text: "retry recovered" }]),
+          );
+        });
+        const settingsManager = SettingsManager.inMemory({
+          compaction: { enabled: false },
+          retry: { enabled: true, baseDelayMs: 10_000, maxRetries: 1 },
+        });
+        ({ session } = await createTestSession({ settingsManager }));
+        const lifecycleEvents: string[] = [];
+        session.subscribe((event) => lifecycleEvents.push(event.type));
+
+        prompt = session.prompt("initial prompt");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(requests).toHaveLength(1);
+        expect(lifecycleEvents).toContain("auto_retry_start");
+        expect(session.isRetrying).toBe(true);
+        expect(session.agent.signal).toBeUndefined();
+
+        if (action !== "abort-empty") {
+          await session.prompt("steer during retry", { streamingBehavior: "steer" });
+          expect(session.getSteeringMessages()).toEqual(["steer during retry"]);
         }
-        return createAssistantResultStream(
-          createAssistant(activeModel, [{ type: "text", text: "retry recovered" }]),
-        );
-      });
-      const settingsManager = SettingsManager.inMemory({
-        compaction: { enabled: false },
-        retry: { enabled: true, baseDelayMs: 10_000, maxRetries: 1 },
-      });
-      const { session } = await createTestSession({ settingsManager });
-      const lifecycleEvents: string[] = [];
-      session.subscribe((event) => lifecycleEvents.push(event.type));
+        expect(requests).toHaveLength(1);
 
-      const prompt = session.prompt("initial prompt");
-      await vi.advanceTimersByTimeAsync(0);
-      expect(requests).toHaveLength(1);
-      expect(lifecycleEvents).toContain("auto_retry_start");
+        if (action === "continue") {
+          await vi.advanceTimersByTimeAsync(10_000);
+        } else {
+          await session.abort();
+        }
+        await prompt;
 
-      await session.prompt("steer during retry", { streamingBehavior: "steer" });
-      expect(requests).toHaveLength(1);
-
-      await vi.advanceTimersByTimeAsync(10_000);
-      await prompt;
-
-      expect(requests).toHaveLength(2);
-      expect(JSON.stringify(requests[1]?.messages)).toContain("steer during retry");
-      expect(lifecycleEvents.filter((type) => type === "agent_settled")).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        expect(requests).toHaveLength(action === "continue" ? 2 : 1);
+        if (action === "continue") {
+          expect(JSON.stringify(requests[1]?.messages)).toContain("steer during retry");
+        } else {
+          expect(JSON.stringify(session.agent.state.messages)).not.toContain("steer during retry");
+          expect(session.getSteeringMessages()).toEqual(
+            action === "abort-queued" ? ["steer during retry"] : [],
+          );
+          expect(session.agent.hasQueuedMessages()).toBe(action === "abort-queued");
+        }
+        expect(session.isRetrying).toBe(false);
+        expect(lifecycleEvents.filter((type) => type === "agent_settled")).toHaveLength(1);
+      } finally {
+        await session?.abort();
+        await Promise.allSettled(prompt ? [prompt] : []);
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it.each([
     {
