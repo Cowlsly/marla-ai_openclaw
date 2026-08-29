@@ -83,7 +83,7 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
   private operationId = 0;
   private launchOperationId = 0;
   private controlTakeoverRecoveryUsed = false;
-  private requestedSourceResolved = false;
+  private sourceSelection: "pending" | "resolved" | "picker" = "pending";
   private readonly mobileKeyboard = new DesktopMobileKeyboard({
     connection: () => this.connection,
     controlling: () => this.controlling,
@@ -151,7 +151,7 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
     if ((this.documentMode || this.embedded) && presentationChanged) {
       // Release input and invalidate pending work before resolving a different session or machine.
       this.returnToPicker();
-      this.requestedSourceResolved = false;
+      this.sourceSelection = "pending";
       if (this.available && (!this.embedded || (this.presented && this.refreshOnPresentation))) {
         void this.refreshEnvironments();
       }
@@ -188,6 +188,9 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
       if (detail?.environmentId) {
         void this.connectRequestedEnvironment(detail.environmentId);
       } else {
+        this.returnToPicker();
+        // An untargeted shell command opens the picker, overriding this presentation's session default.
+        this.sourceSelection = "picker";
         void this.refreshEnvironments();
       }
       return;
@@ -282,10 +285,10 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
   }
 
   private async resolveRequestedSource(operationId: number): Promise<void> {
-    if (this.requestedSourceResolved || operationId !== this.operationId) {
+    if (this.sourceSelection !== "pending" || operationId !== this.operationId) {
       return;
     }
-    this.requestedSourceResolved = true;
+    this.sourceSelection = "resolved";
     const requestedSource = await resolveDesktopDocumentInventoryTarget({
       client: this.client,
       source: this.requestedSource,
@@ -308,7 +311,7 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
 
   private async connectRequestedEnvironment(environmentId: string): Promise<void> {
     this.returnToPicker();
-    this.requestedSourceResolved = true;
+    this.sourceSelection = "resolved";
     this.environmentId = environmentId;
     this.state = "connecting";
     const operationId = this.operationId;
@@ -601,8 +604,10 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
       reason: this.disconnectedReason,
       onRetry: () => {
         if (this.state === "inventory-error" && (this.documentMode || !this.environmentId)) {
-          this.requestedSourceResolved = false;
-          this.state = "connecting";
+          if (this.sourceSelection !== "picker") {
+            this.sourceSelection = "pending";
+          }
+          this.state = "picker";
           void this.refreshEnvironments();
           return;
         }
