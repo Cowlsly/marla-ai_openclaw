@@ -21,7 +21,13 @@ import { loadGatewaySessionEntryReadOnly } from "./session-utils.js";
 
 it("refreshes a retained pane from a persisted profile-only selection through the Gateway lifecycle broadcaster", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const model = { provider: "anthropic", id: "claude-opus-4-6", name: "Model" };
+    // The picker supplies prepared capabilities; omission would start unrelated catalog discovery.
+    const model = {
+      provider: "anthropic",
+      id: "claude-opus-4-6",
+      name: "Model",
+      reasoning: false,
+    };
     const sessionKey = "agent:main:profile";
     const otherKey = "agent:main:other";
     const entry = {
