@@ -1010,12 +1010,20 @@ describe("ensureOnboardingPluginInstalled", () => {
     const [npmCall] = readFirstMockCall(installPluginFromNpmSpec, "installPluginFromNpmSpec") as [
       NpmSpecInstallCall,
     ];
-    expect(npmCall.spec).toBe(`@openclaw/codex@${VERSION}`);
+    expect(npmCall.spec).toBe(
+      resolveNpmInstallSpecsForUpdateChannel({
+        spec: "@openclaw/codex",
+        updateChannel: "stable",
+        officialPackageName: "@openclaw/codex",
+        coreVersion: VERSION,
+        versionBoundToCore: true,
+      }).installSpec,
+    );
     const [, recordUpdate] = readFirstMockCall(recordPluginInstall, "recordPluginInstall") as [
       OpenClawConfig,
       PluginInstallRecord,
     ];
-    expect(recordUpdate.spec).toBe(expectedNpmInstallSpec("@openclaw/codex"));
+    expect(recordUpdate.spec).toBe("@openclaw/codex");
   });
 
   it("logs npm install warnings once while shortening the progress label", async () => {
