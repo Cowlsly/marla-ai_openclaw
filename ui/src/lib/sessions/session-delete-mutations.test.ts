@@ -93,6 +93,35 @@ describe("optimistic session deletion", () => {
     },
   );
 
+  it("lets an unloaded local RPC confirm without trusting a key-only event", async () => {
+    const h = createSessionDeletionHarness();
+    const facts: string[] = [];
+    h.sessions.subscribe((state) => facts.push(...state.deletedSessions.map(({ key }) => key)));
+    try {
+      h.setRows([h.sibling]);
+      await h.sessions.refresh({ force: true });
+      const deletion = h.sessions.delete(h.alpha.key);
+      h.emitEvent({
+        type: "event",
+        event: "sessions.changed",
+        payload: {
+          sessionKey: h.alpha.key,
+          agentId: "main",
+          reason: "delete",
+        },
+      });
+      expect(h.sessions.deletionState(h.alpha.key)).toBe("pending");
+      expect(facts).toEqual([]);
+      h.responses.get(h.alpha.key)!.resolve({ deleted: true });
+      await deletion;
+      expect(h.sessions.deletionState(h.alpha.key)).toBe("confirmed");
+      expect(facts).toContain(h.alpha.key);
+    } finally {
+      h.responses.get(h.alpha.key)?.resolve({ deleted: false });
+      h.sessions.dispose();
+    }
+  });
+
   it("recognizes global aliases without crossing the selected agent", async () => {
     const h = createSessionDeletionHarness();
     h.gateway.snapshot.hello = {

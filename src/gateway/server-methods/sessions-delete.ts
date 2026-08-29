@@ -386,6 +386,7 @@ export const sessionDeleteHandlers: GatewayRequestHandlers = {
     if (deleted) {
       emitSessionsChanged(context, {
         sessionKey: target.canonicalKey,
+        sessionId: deletion.deletedSessionId,
         agentId: target.agentId,
         reason: "delete",
       });

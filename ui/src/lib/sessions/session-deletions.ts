@@ -2,6 +2,7 @@ import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { formatUiError } from "../format-error.ts";
 import { showToast } from "../toast.ts";
+import type { readSessionChangedEvent } from "./reconcile.ts";
 import type {
   SessionConnectionOwner,
   SessionDeleteBatchResult,
@@ -376,9 +377,18 @@ export function createSessionDeletions(host: DeletionHost) {
         ? result
         : { ...result, sessions, count: sessions.length };
     },
-    observe(key: string, agentId: string | null | undefined, reason: string) {
+    observe(event: NonNullable<ReturnType<typeof readSessionChangedEvent>>) {
+      const { key, agentId, reason, sessionId } = event;
       if (reason === "delete") {
-        const deletion = begin({ key, ...(agentId ? { agentId } : {}) });
+        if (!sessionId) {
+          host.invalidateLists();
+          return;
+        }
+        const deletion = begin({
+          key,
+          expectedSessionId: sessionId,
+          ...(agentId ? { agentId } : {}),
+        });
         confirm(deletion, key);
       } else if (reason === "create" || reason === "new") {
         const deletion = find(key, agentId);

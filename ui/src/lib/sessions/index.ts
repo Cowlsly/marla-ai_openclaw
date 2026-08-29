@@ -397,6 +397,12 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     if (reconciled.result !== previous && reconciled.key && eventInfo) {
       mutations.observeArchiveState(reconciled.key, eventInfo.archived, reconciled.row);
     }
+    if (
+      eventInfo &&
+      (eventInfo.reason !== "delete" || reconciled.deletedKey || !eventInfo.sessionId)
+    ) {
+      deletions.observe(eventInfo);
+    }
     return { eventInfo, reconciled, claimChanged };
   };
 
@@ -414,9 +420,6 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
             result,
             row: base.row ? result?.sessions.find((row) => row.key === base.row?.key) : undefined,
           };
-    if (reconciled.deletedKey) {
-      deletions.observe(reconciled.deletedKey, reconciled.agentId, "delete");
-    }
     if (
       claimChanged ||
       (reconciled.applied && (reconciled.result !== state.result || reconciled.deletedKey))
@@ -569,9 +572,6 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     }
     if (event.event === "session.message" && !runEnded) {
       return;
-    }
-    if (eventInfo && typeof eventReason === "string") {
-      deletions.observe(eventInfo.key, eventInfo.agentId, eventReason);
     }
     roster.scheduleEvent({
       agentId:

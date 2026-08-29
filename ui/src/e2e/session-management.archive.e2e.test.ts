@@ -951,6 +951,7 @@ suite.define(() => {
         agentId: "main",
         reason: "delete",
         sessionKey: deletedKey,
+        sessionId: `session:${deletedKey}`,
       });
 
       await expect

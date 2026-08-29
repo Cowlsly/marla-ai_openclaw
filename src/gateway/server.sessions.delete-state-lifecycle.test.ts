@@ -64,6 +64,42 @@ afterEach(() => {
   closeOpenClawStateDatabaseForTest();
 });
 
+test("sessions.delete broadcasts the removed generation after a replacement appears", async () => {
+  const { storePath } = await createSessionStoreDir();
+  const sessionKey = "agent:main:event-generation";
+  await writeSessionStore({ entries: { [sessionKey]: sessionStoreEntry("generation-a") } });
+  const broadcast = vi.fn();
+  const deleted = await directSessionReq(
+    "sessions.delete",
+    { key: sessionKey },
+    {
+      coercePayload: (payload) => {
+        replaceSessionEntrySync({ sessionKey, storePath }, sessionStoreEntry("generation-b"));
+        return payload;
+      },
+      context: {
+        broadcastToConnIds: broadcast,
+        getSessionEventSubscriberConnIds: () => new Set(["observer"]),
+      },
+    },
+  );
+  expect(deleted).toMatchObject({ ok: true, payload: { deleted: true } });
+  expect(loadSessionEntry({ sessionKey, storePath })?.sessionId).toBe("generation-b");
+  expect(broadcast.mock.calls.map(([event, payload]) => ({ event, payload }))).toEqual([
+    {
+      event: "sessions.changed",
+      payload: {
+        sessionKey,
+        agentId: "main",
+        sessionId: "generation-a",
+        reason: "delete",
+        ts: expect.any(Number),
+      },
+    },
+    { event: "sessions.changed", payload: { reason: "delete", ts: expect.any(Number) } },
+  ]);
+});
+
 test("sessions.delete removes the session board from its agent database", async () => {
   const { dir } = await createSessionStoreDir();
   await writeSingleLineSession(dir, "sess-board", "hello");

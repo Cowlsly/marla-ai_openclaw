@@ -246,6 +246,7 @@ describe("session deletion generation ownership", () => {
           payload: {
             sessionKey: h.alpha.key,
             reason: "delete",
+            sessionId: h.alpha.sessionId,
             agentId: "main",
           },
         });
@@ -305,6 +306,7 @@ describe("session deletion generation ownership", () => {
           payload: {
             sessionKey: h.alpha.key,
             reason: "delete",
+            sessionId: h.alpha.sessionId,
             agentId: "main",
           },
         });
