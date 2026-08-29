@@ -32,6 +32,8 @@ describe("repository Telegram E2E skill", () => {
       short_description: "Drive leased Telegram Test Server bots as a real QA user.",
     });
     expect(descriptor.interface.default_prompt).toContain("$telegram-e2e-userbot");
+    expect(descriptor.interface.default_prompt).toContain("exact changed Telegram behavior");
+    expect(descriptor.interface.default_prompt).toContain("extend the harness freely");
   });
 
   it("passes its Node test suite", () => {

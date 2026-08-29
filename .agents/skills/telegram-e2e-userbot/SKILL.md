@@ -1,6 +1,6 @@
 ---
 name: telegram-e2e-userbot
-description: "Run OpenClaw Telegram E2E on Telegram's Test Server with Convex-leased team credentials; drive real-user turns and record messages, edits, deletions, reactions, typing, or rich content."
+description: "Prove user-visible OpenClaw Telegram behavior on Telegram's Test Server with Convex-leased team credentials; drive real-user turns and record messages, edits, deletions, reactions, typing, or rich content."
 metadata:
   short-description: Telegram E2E via real-user driver
   argument-hint: "<message-or-command?>"
@@ -71,9 +71,15 @@ the behavior under test. Prefer a DM for isolation. Use the shared group only
 when group policy, mentions, commands, topics, or reactions are part of the
 claim.
 
-The generic `OPENCLAW_E2E_OK` turn proves only the default message path. A
-channel-visible change needs a recipe whose timeline exposes that change. If the
-diff is not channel-visible, state that boundary and use the generic turn.
+Exercise the exact behavior changed by the diff. The generic `OPENCLAW_E2E_OK`
+turn proves only the default message path. Formatting, commands, media, edits,
+deletions, reactions, topics, and timing each need actions and recorded events
+that expose the specific claim.
+
+Treat the harness as an extension point. When its current actions, recorder
+fields, or recipes cannot expose the claim, extend them in the tested checkout.
+Use the leased TDLib session or any Telegram Test Bot API method needed to cover
+the behavior.
 
 For a non-default backend or timed scenario, read the matching section of the
 [runtime reference](features/runtime-reference.md).
