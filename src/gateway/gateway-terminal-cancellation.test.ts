@@ -408,8 +408,8 @@ describe("Gateway terminal cancellation", () => {
         }, WAIT);
 
         if (abort) {
-          // Late receipt listeners miss the already-published agent_end snapshot.
-          // Observe the existing 120s commit deadline and later admission, not a fake short timeout.
+          // Observe B's actual disposition; logical settlement can release it before
+          // the existing 120s commit deadline. Keep the full bounded observation window.
           await vi.waitFor(
             () => {
               expect(instance.logs()).toContain(`embedded run done: runId=${runB} `);

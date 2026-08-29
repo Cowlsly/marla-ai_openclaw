@@ -9,7 +9,6 @@ import type {
   UserTurnTranscriptRecorder,
 } from "../../sessions/user-turn-transcript.types.js";
 import type { AgentMessage } from "../runtime/index.js";
-import { isTurnHandoffAbort } from "../runtime/internal-hooks.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { AgentSessionBase } from "./agent-session-base.js";
 import type { PromptOptions } from "./agent-session-types.js";
@@ -19,51 +18,84 @@ import { expandPromptTemplate } from "./prompt-templates.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { setSteeringMessageIdentity } from "./steering-message-identity.js";
 
-type PostAgentRunAction = "continue" | "settled";
+type PostAgentRunAction = "continue" | "settled" | "handoff";
+
+function rethrowPromptFinalizationFailure(failed: boolean, error: unknown): void {
+  if (failed) {
+    throw error;
+  }
+}
 
 export abstract class AgentSessionPrompting extends AgentSessionBase {
+  private logicalPromptActive = false;
+
   // =========================================================================
   // Prompting
   // =========================================================================
 
   private async runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-    const ownedRun: { signal: AbortSignal | undefined } = { signal: undefined };
-    const startRun = (start: () => Promise<void>): Promise<void> => {
-      const priorSignal = this.agent.signal;
-      const promise = start();
-      const startedSignal = this.agent.signal;
-      // Agent acquires its controller synchronously. Retain completed ownership
-      // when an idle continuation rejects, but never settle a foreign active run.
-      if (startedSignal !== priorSignal) {
-        ownedRun.signal = startedSignal;
-      } else if (priorSignal) {
-        ownedRun.signal = undefined;
-      }
-      return promise;
-    };
+    if (this.logicalPromptActive) {
+      throw new Error(
+        "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+      );
+    }
+    // Retry and compaction gaps briefly make the core idle, but the logical prompt
+    // still owns continuation and its one terminal fact until this scope closes.
+    this.logicalPromptActive = true;
+    let endedForTurnHandoff = false;
     try {
-      await startRun(() => this.agent.prompt(messages));
+      await this.agent.prompt(messages);
       while (true) {
-        const action = await this.handlePostAgentRun(ownedRun.signal);
-        if (action !== "continue" || ownedRun.signal?.aborted) {
+        const action = await this.handlePostAgentRun();
+        if (action !== "continue") {
+          endedForTurnHandoff = action === "handoff";
           break;
         }
-        await startRun(() => this.agent.continue());
+        await this.agent.continue();
       }
     } finally {
       this.systemPromptOverride = undefined;
-      this.flushPendingBashMessages();
-      // Failed or aborted runs can still be idle; only handoff leaves external delivery pending.
-      if (ownedRun.signal && !isTurnHandoffAbort(ownedRun.signal)) {
-        await this.currentExtensionRunner.emit({ type: "agent_settled" });
+      let flushFailed = false;
+      let flushError: unknown;
+      try {
+        this.flushPendingBashMessages();
+      } catch (error) {
+        flushFailed = true;
+        flushError = error;
       }
+      this.logicalPromptActive = false;
+      let terminalFailed = false;
+      let terminalError: unknown;
+      try {
+        // Consume handoff state before callbacks can start a nested run and set it again.
+        endedForTurnHandoff ||= this.lastRunEndedForTurnHandoff;
+        this.lastRunEndedForTurnHandoff = false;
+        // Failed or aborted runs can still be idle; only handoff leaves external delivery pending.
+        if (endedForTurnHandoff) {
+          this.emit({ type: "agent_handoff" });
+        } else {
+          this.emit({ type: "agent_settled" });
+          await this.currentExtensionRunner.emit({ type: "agent_settled" });
+        }
+      } catch (error) {
+        terminalFailed = true;
+        terminalError = error;
+      }
+      rethrowPromptFinalizationFailure(flushFailed, flushError);
+      rethrowPromptFinalizationFailure(terminalFailed, terminalError);
     }
   }
 
-  private async handlePostAgentRun(signal: AbortSignal | undefined): Promise<PostAgentRunAction> {
+  private async handlePostAgentRun(): Promise<PostAgentRunAction> {
     const msg = this.lastAssistantMessage;
     this.lastAssistantMessage = undefined;
-    if (signal?.aborted || !msg || msg.stopReason === "aborted") {
+    const endedForTurnHandoff = this.lastRunEndedForTurnHandoff;
+    this.lastRunEndedForTurnHandoff = false;
+    if (endedForTurnHandoff) {
+      // External delivery owns the next run after a deliberate turn handoff.
+      return "handoff";
+    }
+    if (!msg || msg.stopReason === "aborted") {
       return "settled";
     }
 
@@ -164,7 +196,7 @@ export abstract class AgentSessionPrompting extends AgentSessionBase {
       }
 
       // If streaming, queue via steer() or followUp() based on option
-      if (this.isStreaming) {
+      if (this.isStreaming || this.logicalPromptActive) {
         if (!options?.streamingBehavior) {
           throw new Error(
             "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
