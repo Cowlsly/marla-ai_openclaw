@@ -28,19 +28,34 @@ const RECOVERABLE_UPDATE = {
       status: "error",
       reason: "post-plugin-doctor-invalid-config",
       warnings: [{ reason: 'Plugin "discord" requires capability consent.' }],
+      sync: { errors: [] },
+      npm: { outcomes: [] },
+      integrityDrifts: [],
     },
   },
 };
 
 function runJsonAssertion(command: string, value: unknown, ...args: string[]) {
+  return runJsonTextAssertion(command, `${JSON.stringify(value, null, 2)}\n`, ...args);
+}
+
+function runJsonTextAssertion(command: string, contents: string, ...args: string[]) {
   const root = mkdtempSync(join(tmpdir(), "openclaw-upgrade-json-"));
   const file = join(root, "result.json");
-  writeJson(file, value);
+  writeFileSync(file, contents);
   const result = spawnSync(process.execPath, [ASSERTIONS_PATH, command, file, ...args], {
     encoding: "utf8",
   });
   rmSync(root, { force: true, recursive: true });
   return result;
+}
+
+function runPrefixedJsonAssertion(command: string, value: unknown, ...args: string[]) {
+  return runJsonTextAssertion(
+    command,
+    `Stopped legacy service before update\n${JSON.stringify(value)}\n`,
+    ...args,
+  );
 }
 
 describe("upgrade recovery result assertions", () => {
@@ -58,11 +73,59 @@ describe("upgrade recovery result assertions", () => {
         "2026.8.1",
       ).status,
     ).not.toBe(0);
+    expect(
+      runPrefixedJsonAssertion("assert-successful-update-json", result, "2026.8.1").status,
+    ).toBe(0);
   });
 
   it("accepts only a completed core swap stranded on capability consent", () => {
     expect(
       runJsonAssertion("assert-recoverable-update-json", RECOVERABLE_UPDATE, "2026.8.1").status,
+    ).toBe(0);
+    expect(
+      runPrefixedJsonAssertion("assert-recoverable-update-json", RECOVERABLE_UPDATE, "2026.8.1")
+        .status,
+    ).toBe(0);
+    expect(
+      runJsonAssertion(
+        "assert-recoverable-update-json",
+        {
+          ...RECOVERABLE_UPDATE,
+          postUpdate: {
+            plugins: {
+              ...RECOVERABLE_UPDATE.postUpdate.plugins,
+              warnings: [],
+              sync: { errors: ['Plugin "discord" requires capability consent.'] },
+            },
+          },
+        },
+        "2026.8.1",
+      ).status,
+    ).toBe(0);
+    expect(
+      runJsonAssertion(
+        "assert-recoverable-update-json",
+        {
+          ...RECOVERABLE_UPDATE,
+          postUpdate: {
+            plugins: {
+              ...RECOVERABLE_UPDATE.postUpdate.plugins,
+              warnings: [],
+              npm: {
+                outcomes: [
+                  {
+                    pluginId: "discord",
+                    status: "error",
+                    code: "PLUGIN_CAPABILITY_CONSENT_REQUIRED",
+                    message: "consent required",
+                  },
+                ],
+              },
+            },
+          },
+        },
+        "2026.8.1",
+      ).status,
     ).toBe(0);
 
     const invalidResults = [
@@ -78,6 +141,69 @@ describe("upgrade recovery result assertions", () => {
         ...RECOVERABLE_UPDATE,
         postUpdate: {
           plugins: { status: "error", reason: "registry-timeout", warnings: [] },
+        },
+      },
+      {
+        ...RECOVERABLE_UPDATE,
+        postUpdate: {
+          plugins: {
+            ...RECOVERABLE_UPDATE.postUpdate.plugins,
+            sync: {
+              errors: [
+                'Plugin "discord" requires capability consent.',
+                "discord registry unavailable",
+              ],
+            },
+          },
+        },
+      },
+      {
+        ...RECOVERABLE_UPDATE,
+        postUpdate: {
+          plugins: {
+            ...RECOVERABLE_UPDATE.postUpdate.plugins,
+            npm: {
+              outcomes: [
+                { pluginId: "discord", status: "error", message: "package update failed" },
+              ],
+            },
+          },
+        },
+      },
+      {
+        ...RECOVERABLE_UPDATE,
+        postUpdate: {
+          plugins: {
+            ...RECOVERABLE_UPDATE.postUpdate.plugins,
+            integrityDrifts: [{ pluginId: "discord", action: "aborted" }],
+          },
+        },
+      },
+      {
+        ...RECOVERABLE_UPDATE,
+        postUpdate: {
+          plugins: {
+            ...RECOVERABLE_UPDATE.postUpdate.plugins,
+            sync: undefined,
+          },
+        },
+      },
+      {
+        ...RECOVERABLE_UPDATE,
+        postUpdate: {
+          plugins: {
+            ...RECOVERABLE_UPDATE.postUpdate.plugins,
+            npm: undefined,
+          },
+        },
+      },
+      {
+        ...RECOVERABLE_UPDATE,
+        postUpdate: {
+          plugins: {
+            ...RECOVERABLE_UPDATE.postUpdate.plugins,
+            integrityDrifts: undefined,
+          },
         },
       },
     ];
