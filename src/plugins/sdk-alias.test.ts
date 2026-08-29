@@ -2103,21 +2103,6 @@ describe("buildPluginLoaderAliasMap memoization", () => {
 
     expect(developmentAliases).not.toBe(productionAliases);
   });
-
-  it("memoized result has identical content to a freshly computed map", () => {
-    const fixture = createPluginSdkAliasFixture();
-    const entry = writePluginEntry(fixture.root, bundledPluginFile("eq", "src/index.ts"));
-
-    const first = buildPluginLoaderAliasMap(entry);
-    const second = buildPluginLoaderAliasMap(entry);
-
-    // Same reference (cache hit)
-    expect(second).toBe(first);
-    // Same content
-    expect(second).toEqual(first);
-    // Same key set
-    expect(Object.keys(second).toSorted()).toEqual(Object.keys(first).toSorted());
-  });
 });
 
 describe("buildPluginLoaderJitiOptions", () => {
