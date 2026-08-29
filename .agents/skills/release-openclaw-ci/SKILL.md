@@ -84,6 +84,11 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   publication.
 - Post-merge controller proof must use the reviewed landed SHA on protected
   `main` through the non-release `FRV Proof Broker` and `FRV Proof Fixture`.
+  Dispatch the broker with the merged pull request number and exact landed
+  commit. The broker must require that pull request's merge commit to match the
+  landed commit, prove the landed commit is identical to or an ancestor of its
+  trusted workflow SHA, and repeat authority, merge, and ancestry checks
+  immediately before rerunning the fixture.
   Require the exact fixed no-op fixture run to advance from its intentional
   attempt-one failure to an attempt-two pass. The broker must emit its receipt
   without creating a release candidate, release artifact, publication,
