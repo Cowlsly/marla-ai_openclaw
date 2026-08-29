@@ -358,7 +358,7 @@ merge_run() {
   enter_worktree "$pr" false || return 1
   # Earlier wrappers captured output at dispatch without recording intent. Even
   # an empty capture may represent a submitted request; never overwrite that evidence.
-  if [ -e .local/merge-output.log ]; then
+  if [ -e .local/merge-output.log ] || [ -L .local/merge-output.log ]; then
     merge_outcome_stop "prior merge output exists without an outcome record; preserve .local/merge-output.log and reconcile the earlier request manually"
     return 1
   fi
@@ -561,15 +561,7 @@ merge_run() {
   local root
   root=$(repo_root)
   cd "$root" || return 1
-  remove_worktree_if_present ".worktrees/pr-$pr"
-  delete_local_branch_if_safe "temp/pr-$pr"
-  delete_local_branch_if_safe "pr-$pr"
-  delete_local_branch_if_safe "pr-$pr-prep"
-  [ ! -e ".worktrees/pr-$pr" ] || cleanup_complete=false
-  local branch
-  for branch in "temp/pr-$pr" "pr-$pr" "pr-$pr-prep"; do
-    if git show-ref --verify --quiet "refs/heads/$branch"; then cleanup_complete=false; fi
-  done
+  cleanup_pr_worktree ".worktrees/pr-$pr" || cleanup_complete=false
   if [ "$cleanup_complete" = true ]; then
     merge_outcome_write "$(printf '%s\n' "$MERGE_OUTCOME_RECORD" | jq -c '.phase="complete"')" || return 1
     echo "merge-run complete for PR #$pr"
