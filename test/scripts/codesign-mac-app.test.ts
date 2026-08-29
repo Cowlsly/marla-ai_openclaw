@@ -138,29 +138,46 @@ exit 0
 }
 
 describe("codesign-mac-app temp file hygiene", () => {
-  it.runIf(process.platform === "darwin")(
-    "signs nested worker code before the app without disabling library validation",
-    () => {
+  it.runIf(process.platform === "darwin").each([
+    { arch: "arm64", sdkArch: "arm64", cpuType: 0x0100000c },
+    { arch: "x86_64", sdkArch: "x64", cpuType: 0x01000007 },
+  ])(
+    "limits worker JIT entitlements to known JS runtime executables on $arch",
+    ({ arch, sdkArch, cpuType }) => {
       const tempRoot = tempDirs.make("openclaw-codesign-worker-");
       const app = path.join(tempRoot, "Fake.app");
       const binDir = path.join(tempRoot, "bin");
       const captureDir = path.join(tempRoot, "capture");
       const logPath = path.join(captureDir, "codesign.log");
       const argsPath = path.join(captureDir, "args.log");
-      const node = path.join(app, "Contents/Resources/node-worker/arm64/bin/node");
-      const addon = path.join(app, "Contents/Resources/node-worker/arm64/lib/addon.node");
-      for (const directory of [binDir, captureDir, path.dirname(node), path.dirname(addon)]) {
+      const workerRoot = path.join(app, "Contents/Resources/node-worker", arch);
+      const modules = "lib/node_modules/openclaw/node_modules";
+      const sdkRuntime = `node_modules/@anthropic-ai/claude-agent-sdk-darwin-${sdkArch}/claude`;
+      const fixtures = [
+        ["bin/node", 2, true],
+        [`lib/node_modules/openclaw/${sdkRuntime}`, 2, true],
+        [`${modules}/nested/${sdkRuntime}`, 2, true],
+        [
+          `${modules}/@lydell/node-pty-darwin-${sdkArch}/prebuilds/darwin-${sdkArch}/spawn-helper`,
+          2,
+          false,
+        ],
+        [`${modules}/other/bin/node`, 2, false],
+        [`${modules}/other/claude`, 2, false],
+        [`${modules}/library/${sdkRuntime}`, 6, false],
+        ["lib/addon.node", 6, false],
+      ] as const;
+      for (const directory of [binDir, captureDir]) {
         mkdirSync(directory, { recursive: true });
       }
       // Mach-O headers let the real file classifier distinguish executable and
       // addon code; only codesign is replaced, so no identity or signature is used.
-      for (const [filename, fileType] of [
-        [node, 2],
-        [addon, 6],
-      ] as const) {
+      for (const [relativePath, fileType] of fixtures) {
+        const filename = path.join(workerRoot, relativePath);
+        mkdirSync(path.dirname(filename), { recursive: true });
         const header = Buffer.alloc(32);
         header.writeUInt32LE(0xfeedfacf, 0);
-        header.writeUInt32LE(0x0100000c, 4);
+        header.writeUInt32LE(cpuType, 4);
         header.writeUInt32LE(fileType, 12);
         writeFileSync(filename, header);
       }
@@ -180,20 +197,30 @@ describe("codesign-mac-app temp file hygiene", () => {
       });
       expect(result.status, result.stderr).toBe(0);
       const lines = readFileSync(logPath, "utf8").trim().split("\n");
-      const nodeLine = lines.find((line) => line.startsWith(`entitled\t${node}\t`));
-      expect(nodeLine).toBeDefined();
-      const entitlements = readFileSync(
-        expectDefined(nodeLine?.split("\t")[3], "Node entitlements"),
-        "utf8",
-      );
-      expect(entitlements).toContain("com.apple.security.cs.allow-jit");
-      expect(entitlements).not.toContain("disable-library-validation");
-      expect(entitlements).not.toContain("automation.apple-events");
-      expect(lines).toContain(`plain\t${addon}`);
-      expect(lines.at(-1)).toMatch(new RegExp(`^entitled\\t${app}\\t`));
       const args = readFileSync(argsPath, "utf8");
-      expect(args).toContain(`--verify --strict ${node}`);
-      expect(args).toContain(`--verify --strict ${addon}`);
+      for (const [relativePath, , jit] of fixtures) {
+        const filename = path.join(workerRoot, relativePath);
+        const entitledLine = lines.find((line) => line.startsWith(`entitled\t${filename}\t`));
+        if (jit) {
+          const entitlements = readFileSync(
+            expectDefined(entitledLine?.split("\t")[3], `${relativePath} entitlements`),
+            "utf8",
+          );
+          expect(
+            Array.from(entitlements.matchAll(/<key>([^<]+)<\/key>/g), (match) => match[1]),
+          ).toEqual([
+            "com.apple.security.cs.allow-jit",
+            "com.apple.security.cs.allow-unsigned-executable-memory",
+          ]);
+        } else {
+          expect(entitledLine, `${relativePath} must be plain-signed`).toBeUndefined();
+          expect(args).toContain(
+            `--force --options runtime --timestamp --sign Developer ID Application: Fixture ${filename}`,
+          );
+        }
+        expect(args).toContain(`--verify --strict ${filename}`);
+      }
+      expect(lines.at(-1)).toMatch(new RegExp(`^entitled\\t${app}\\t`));
     },
   );
 
@@ -249,19 +276,24 @@ describe("codesign-mac-app temp file hygiene", () => {
   it("cleans entitlement temp files when signing fails", () => {
     const tempRoot = tempDirs.make("openclaw-codesign-fail-");
     const app = path.join(tempRoot, "Fake.app");
+    const binDir = path.join(tempRoot, "bin");
     mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(binDir);
+    installTransientFakeCodesign(binDir);
 
     const result = spawnSync("bash", [scriptPath, app], {
       cwd: process.cwd(),
       encoding: "utf8",
       env: {
-        ...process.env,
-        ALLOW_ADHOC_SIGNING: "1",
+        PATH: `${binDir}:/usr/bin:/bin`,
+        SIGN_IDENTITY: "-",
+        CODESIGN_COUNT_FILE: path.join(tempRoot, "codesign-count"),
+        CODESIGN_PERMANENT_FAILURE: "1",
         TMPDIR: tempRoot,
       },
     });
 
-    expect(result.status).not.toBe(0);
+    expect(result.status).toBe(7);
     expect(entitlementTemps(tempRoot)).toEqual([]);
   });
 

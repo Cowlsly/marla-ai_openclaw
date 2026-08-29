@@ -12,6 +12,13 @@ struct ExecHostSocketCancellationTests {
         case serverStop
     }
 
+    private static let socketTimeoutSeconds = 5
+
+    private enum CommandEvent: Sendable {
+        case ready
+        case finished(ExecHostResponse)
+    }
+
     @Test
     func `normal request half-close still receives native execution result`() async throws {
         try await self.withServer { server, root in
@@ -33,12 +40,36 @@ struct ExecHostSocketCancellationTests {
     func `closed caller or server stops native command and its descendant`(
         _ cancellation: Cancellation, withTimeout: Bool) async throws
     {
-        try await self.withServer { server, root in
+        let (events, continuation) = AsyncStream<CommandEvent>.makeStream()
+        defer { continuation.finish() }
+        try await self.withServer(onExecFinished: { response in
+            continuation.yield(.finished(response))
+            continuation.finish()
+        }) { server, root in
             var client = try self.connect(root)
             defer { if client >= 0 { close(client) } }
             let parentFile = root.appendingPathComponent("parent.pid")
             let childFile = root.appendingPathComponent("child.pid")
             let sentinel = root.appendingPathComponent("sentinel")
+            let readyURL = root.appendingPathComponent("ready")
+            let releaseURL = root.appendingPathComponent("release")
+            let ready = try self.makeFIFO(readyURL)
+            defer { try? ready.close() }
+            let release = try self.makeFIFO(releaseURL)
+            defer { try? release.close() }
+            defer { TestProcessSupport.killLeakedProcesses(in: [parentFile, childFile]) }
+            ready.readabilityHandler = { handle in
+                handle.readabilityHandler = nil
+                continuation.yield(.ready)
+                continuation.finish()
+            }
+            defer { ready.readabilityHandler = nil }
+            // Use the socket's existing watchdog, not a separate startup SLA across MainActor policy work.
+            let watchdog = DispatchWorkItem { continuation.finish() }
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + .seconds(Self.socketTimeoutSeconds), execute: watchdog)
+            defer { watchdog.cancel() }
+            // Ready is published only after both PID writes and opening the child's release gate.
             let command = [
                 "/bin/sh", "-c",
                 """
@@ -46,31 +77,49 @@ struct ExecHostSocketCancellationTests {
                 /bin/sh -c '
                   trap "" TERM
                   printf "%s" "$$" > "\(childFile.path)"
-                  /bin/sleep 2
+                  exec 3< "\(releaseURL.path)"
+                  printf ready > "\(readyURL.path)"
+                  IFS= read -r _ <&3 || exit 1
                   /usr/bin/touch "\(sentinel.path)"
                 ' &
                 wait
                 """,
             ]
-            try self.send(command: command, root: root, client: client, timeoutMs: withTimeout ? 10000 : nil)
-            #expect(shutdown(client, SHUT_WR) == 0)
-            try #require(await self.waitUntil { FileManager.default.fileExists(atPath: childFile.path) })
-            let parent = try self.readPID(parentFile)
-            let child = try self.readPID(childFile)
-            defer {
-                if kill(parent, 0) == 0 { kill(-parent, SIGKILL) }
-                if kill(child, 0) == 0 { kill(child, SIGKILL) }
+            do {
+                try self.send(command: command, root: root, client: client, timeoutMs: withTimeout ? 10000 : nil)
+                #expect(shutdown(client, SHUT_WR) == 0)
+                var iterator = events.makeAsyncIterator()
+                let event = try #require(
+                    await iterator.next(),
+                    "native command did not become ready before socket watchdog")
+                watchdog.cancel()
+                switch event {
+                case .ready:
+                    break
+                case let .finished(response):
+                    let reason = response.error?.reason ?? "none"
+                    Issue.record("execution ended before readiness: ok=\(response.ok), reason=\(reason)")
+                    throw POSIXError(.ECHILD)
+                }
+                let parent = try self.readPID(parentFile)
+                let child = try self.readPID(childFile)
+                switch cancellation {
+                case .disconnect:
+                    close(client)
+                    client = -1
+                case .serverStop:
+                    server.stop()
+                }
+                #expect(await self.waitUntil { self.isGone(parent) && self.isGone(child) })
+                // A surviving child must be released so broken cancellation exposes its side effect.
+                try release.write(contentsOf: Data("go\n".utf8))
+                await server.stop().value
+                #expect(!FileManager.default.fileExists(atPath: sentinel.path))
+            } catch {
+                try? release.write(contentsOf: Data("go\n".utf8))
+                await server.stop().value
+                throw error
             }
-            switch cancellation {
-            case .disconnect:
-                close(client)
-                client = -1
-            case .serverStop:
-                server.stop()
-            }
-            #expect(await self.waitUntil { self.isGone(parent) && self.isGone(child) })
-            try await Task.sleep(for: .milliseconds(2200))
-            #expect(!FileManager.default.fileExists(atPath: sentinel.path))
         }
     }
 
@@ -92,6 +141,7 @@ struct ExecHostSocketCancellationTests {
     }
 
     private func withServer(
+        onExecFinished: @escaping @Sendable (ExecHostResponse) -> Void = { _ in },
         _ body: (ExecApprovalsSocketServer, URL) async throws -> Void) async throws
     {
         let root = try self.makeRoot()
@@ -102,9 +152,11 @@ struct ExecHostSocketCancellationTests {
             token: "test-token",
             onPrompt: { _ in .deny },
             onExec: { request in
-                await ExecApprovalsStore.withStateDirectory(root) {
+                let response = await ExecApprovalsStore.withStateDirectory(root) {
                     await ExecHostExecutor.handle(request)
                 }
+                onExecFinished(response)
+                return response
             },
             onUnexpectedStop: { _ in })
         do {
@@ -115,6 +167,14 @@ struct ExecHostSocketCancellationTests {
             throw error
         }
         await server.stop().value
+    }
+
+    private func makeFIFO(_ url: URL) throws -> FileHandle {
+        try #require(mkfifo(url.path, 0o600) == 0)
+        // Keep both ends open so setup and failure cleanup never block on a missing child.
+        let fd = open(url.path, O_RDWR | O_NONBLOCK | O_CLOEXEC)
+        try #require(fd >= 0)
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 
     private func makeRoot() throws -> URL {
@@ -152,7 +212,7 @@ struct ExecHostSocketCancellationTests {
             close(fd)
             throw POSIXError(.ECONNREFUSED)
         }
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        var timeout = timeval(tv_sec: Self.socketTimeoutSeconds, tv_usec: 0)
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         return fd
     }

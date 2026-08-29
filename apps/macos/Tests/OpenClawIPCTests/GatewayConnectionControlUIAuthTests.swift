@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Testing
 @testable import OpenClaw
@@ -43,9 +42,7 @@ struct GatewayConnectionControlUIAuthTests {
             routeAuthority: 1,
             deviceAuthGatewayID: "route-a"))
         let connection = GatewayConnection(
-            endpointProvider: { source.snapshot() },
-            supportsSharedEndpointRecovery: false,
-            activationBindingKeyProvider: { SymmetricKey(data: Data(repeating: 1, count: 32)) },
+            testEndpointProvider: { source.snapshot() },
             sessionBox: WebSocketSessionBox(session: makeControlUIAuthSession()))
 
         #expect(await connection.controlUiAutoAuthToken(config: routeA) == nil)
@@ -95,7 +92,7 @@ struct GatewayConnectionControlUIAuthTests {
                         deviceAuthGatewayID: "route-a")
                 },
                 supportsSharedEndpointRecovery: false,
-                activationBindingKeyProvider: { SymmetricKey(data: Data(repeating: 1, count: 32)) },
+                activationBindingKeyProvider: { nil },
                 sessionBox: WebSocketSessionBox(session: makeControlUIAuthSession()))
             _ = try await routeAConnection.request(
                 method: "health",
@@ -115,7 +112,7 @@ struct GatewayConnectionControlUIAuthTests {
                         deviceAuthGatewayID: "route-b")
                 },
                 supportsSharedEndpointRecovery: false,
-                activationBindingKeyProvider: { SymmetricKey(data: Data(repeating: 1, count: 32)) },
+                activationBindingKeyProvider: { nil },
                 sessionBox: WebSocketSessionBox(session: makeControlUIAuthSession()))
             _ = try await routeBConnection.request(
                 method: "health",
@@ -147,7 +144,7 @@ struct GatewayConnectionControlUIAuthTests {
             let connection = GatewayConnection(
                 endpointProvider: { source.snapshot() },
                 supportsSharedEndpointRecovery: false,
-                activationBindingKeyProvider: { SymmetricKey(data: Data(repeating: 1, count: 32)) },
+                activationBindingKeyProvider: { nil },
                 sessionBox: WebSocketSessionBox(session: makeControlUIAuthSession(
                     issuedDeviceToken: "route-a-issued-token")))
 

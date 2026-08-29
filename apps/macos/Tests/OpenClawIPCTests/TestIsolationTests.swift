@@ -23,27 +23,32 @@ struct TestIsolationTests {
         await TestIsolationLock.shared.acquire()
         #expect(getenv(key) == nil)
         if let initial = values.initial {
-            setenv(key, initial, 1)
+            #expect(setenv(key, initial, 1) == 0)
         }
         await TestIsolationLock.shared.release()
 
+        var bodyRan = false
         var didThrow = false
         do {
-            try await TestIsolation.withEnvValues([key: values.temporary]) {
+            let result = try await TestIsolation.withEnvValues([key: values.temporary]) {
+                bodyRan = true
                 #expect(getenv(key).map { String(cString: $0) } == values.temporary)
                 if shouldThrow {
                     throw BodyFailure.expected
                 }
+                return "completed"
             }
+            #expect(result == "completed")
         } catch {
             didThrow = true
-            #expect(error is BodyFailure)
+            #expect(error as? BodyFailure == .expected)
         }
+        #expect(bodyRan)
         #expect(didThrow == shouldThrow)
 
         await TestIsolationLock.shared.acquire()
         #expect(getenv(key).map { String(cString: $0) } == values.initial)
-        unsetenv(key)
+        #expect(unsetenv(key) == 0)
         await TestIsolationLock.shared.release()
     }
 }

@@ -3885,77 +3885,36 @@ jobs:
             --parallel
 
       - name: Swift test
+        id: swift-test
         run: |
           set -euo pipefail
-          swift_test_args=(--package-path apps/macos --enable-code-coverage)
+          swift build --package-path apps/macos --build-tests --enable-code-coverage
+          echo "debug-tests-built=true" >> "$GITHUB_OUTPUT"
+          swift_test_args=(--package-path apps/macos --enable-code-coverage --skip-build)
           if [[ "$SWIFT_TEST_EXECUTION" == "parallel" ]]; then
             swift_test_args+=(--parallel)
           else
             swift_test_args+=(--no-parallel)
           fi
-          swift test "${swift_test_args[@]}" <&0 &
-          swift_test_pid=$!
-          diagnostic_pid=
-          stop_diagnostic() {
-            if [[ -n "$diagnostic_pid" ]]; then
-              kill "$diagnostic_pid" 2>/dev/null || true
-              wait "$diagnostic_pid" 2>/dev/null || true
-              diagnostic_pid=
-            fi
-          }
-          trap stop_diagnostic EXIT
-          cancel_swift_test() {
-            stop_diagnostic
-            kill -s "$1" "$swift_test_pid" 2>/dev/null || true
-            swift_test_status=0
-            wait "$swift_test_pid" || swift_test_status=$?
-            exit "$swift_test_status"
-          }
-          trap 'cancel_swift_test INT' INT
-          trap 'cancel_swift_test TERM' TERM
-          trap 'cancel_swift_test HUP' HUP
+          swift test "${swift_test_args[@]}"
 
-          # Temporary: sample only this invocation's long-lived Swift Testing runner.
-          # Runner uptime excludes cold compilation; remove after the parallel stall is diagnosed.
-          (
-            diagnostic_pid=
-            sample_file=
-            trap 'stop_diagnostic; [[ -z "$sample_file" ]] || rm -f "$sample_file"' EXIT
-            trap 'exit 0' INT TERM HUP
-            while kill -0 "$swift_test_pid" 2>/dev/null; do
-              runner_pid="$(/usr/bin/pgrep -P "$swift_test_pid" -x swiftpm-testing || true)"
-              if [[ "$runner_pid" =~ ^[0-9]+$ ]] &&
-                /bin/ps -p "$swift_test_pid,$runner_pid" -o pid=,ppid=,etime=,ucomm= |
-                  awk -v step="$$" -v swift="$swift_test_pid" -v runner="$runner_pid" '
-                    $1 == swift && $2 == step { owned = 1 }
-                    $1 == runner && $2 == swift && $4 == "swiftpm-testing" {
-                      fields = split($3, elapsed, /[-:]/)
-                      ready = fields > 2 || elapsed[1] >= 1
-                    }
-                    END { exit !(owned && ready) }
-                  '; then
-                sample_file="$(mktemp "$RUNNER_TEMP/swift-stall.XXXXXX")"
-                echo "::group::Temporary Swift runner stack (pid $runner_pid, age >=60s, 2s sample)"
-                /usr/bin/sample "$runner_pid" 2 -file "$sample_file" >/dev/null 2>&1 &
-                diagnostic_pid=$!
-                if ! wait "$diagnostic_pid"; then
-                  echo "::warning::Swift runner stack sampling failed; test status is unchanged."
-                fi
-                diagnostic_pid=
-                head -c 262144 "$sample_file"
-                printf '\n::endgroup::\n'
-                exit 0
-              fi
-              sleep 5 &
-              diagnostic_pid=$!
-              wait "$diagnostic_pid"
-              diagnostic_pid=
-            done
-          ) &
-          diagnostic_pid=$!
-          swift_test_status=0
-          wait "$swift_test_pid" || swift_test_status=$?
-          exit "$swift_test_status"
+      - name: Render isolated macOS health fixtures
+        id: health-render
+        if: ${{ !cancelled() && steps.swift-test.outputs.debug-tests-built == 'true' && hashFiles('scripts/test-macos-health-render.sh') != '' }}
+        run: bash scripts/test-macos-health-render.sh
+
+      - name: Upload macOS health component renders
+        if: ${{ always() && steps.health-render.outputs.artifact-path != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-health-component-renders
+          path: |
+            ${{ steps.health-render.outputs.artifact-path }}/ready.png
+            ${{ steps.health-render.outputs.artifact-path }}/startup-grace.png
+            ${{ steps.health-render.outputs.artifact-path }}/stale-socket.png
+            ${{ steps.health-render.outputs.artifact-path }}/disabled.png
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Save SwiftPM cache
         if: needs.preflight.outputs.cache_write_allowed == 'true' && steps.swiftpm-cache.outputs.cache-hit != 'true'
@@ -4533,6 +4492,34 @@ jobs:
           mkdir -p "$sticky_root/gradle-user-home"
           echo "GRADLE_USER_HOME=$sticky_root/gradle-user-home" >> "$GITHUB_ENV"
 
+      - name: Restore Robolectric Maven cache
+        id: robolectric-cache
+        if: startsWith(matrix.task, 'test-') && needs.preflight.outputs.cache_mode != 'off'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/openclaw-robolectric-m2
+          key: ${{ github.repository }}-robolectric-m2-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-${{ hashFiles('apps/android/**/*.gradle*', 'apps/android/**/gradle-wrapper.properties', 'apps/android/gradle/libs.versions.toml', 'apps/android/**/src/test*/**') }}
+          restore-keys: |
+            ${{ github.repository }}-robolectric-m2-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-
+
+      - name: Configure Robolectric Maven cache
+        if: startsWith(matrix.task, 'test-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          maven_repo=/var/tmp/openclaw-robolectric-m2
+          init_script="$RUNNER_TEMP/openclaw-robolectric-init.gradle"
+          mkdir -p "$maven_repo"
+          cat >"$init_script" <<'GROOVY'
+          allprojects {
+            tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+              systemProperty "maven.repo.local", System.getenv("OPENCLAW_ROBOLECTRIC_M2")
+            }
+          }
+          GROOVY
+          echo "OPENCLAW_ROBOLECTRIC_M2=$maven_repo" >> "$GITHUB_ENV"
+          echo "OPENCLAW_ROBOLECTRIC_INIT=$init_script" >> "$GITHUB_ENV"
+
       - name: Run Android ${{ matrix.task }}
         working-directory: apps/android
         env:
@@ -4543,20 +4530,23 @@ jobs:
           set -euo pipefail
           case "$TASK" in
             test-play)
-              ./gradlew --no-daemon --build-cache \
+              ./gradlew --no-daemon --build-cache --init-script "$OPENCLAW_ROBOLECTRIC_INIT" \
                 :app:testPlayDebugUnitTest \
                 :wear-shared:testDebugUnitTest
               ;;
             test-play-compat)
               # Frozen targets predate the Wear shared project. Keep their app-owned
               # Play unit tests without importing current Android modules.
-              ./gradlew --no-daemon --build-cache :app:testPlayDebugUnitTest
+              ./gradlew --no-daemon --build-cache --init-script "$OPENCLAW_ROBOLECTRIC_INIT" \
+                :app:testPlayDebugUnitTest
               ;;
             test-third-party)
-              ./gradlew --no-daemon --build-cache :app:testThirdPartyDebugUnitTest
+              ./gradlew --no-daemon --build-cache --init-script "$OPENCLAW_ROBOLECTRIC_INIT" \
+                :app:testThirdPartyDebugUnitTest
               ;;
             test-wear)
-              ./gradlew --no-daemon --build-cache :wear:testDebugUnitTest
+              ./gradlew --no-daemon --build-cache --init-script "$OPENCLAW_ROBOLECTRIC_INIT" \
+                :wear:testDebugUnitTest
               ;;
             build-play)
               if [ "$CI_RUNNER_BACKEND" = "github" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
@@ -4606,6 +4596,13 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Save Robolectric Maven cache
+        if: success() && startsWith(matrix.task, 'test-') && needs.preflight.outputs.cache_write_allowed == 'true' && steps.robolectric-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/openclaw-robolectric-m2
+          key: ${{ steps.robolectric-cache.outputs.cache-primary-key }}
 
   docker-seed-e2e:
     permissions:
