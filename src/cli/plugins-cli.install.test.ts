@@ -6,8 +6,6 @@ import { installedPluginRoot } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { hashConfigIncludeRaw } from "../config/includes.js";
-import { resolveRegistryUpdateChannel } from "../infra/update-channels.js";
-import { resolveNpmInstallSpecsForUpdateChannel } from "../plugins/install-channel-specs.js";
 import { recordPluginManifestInstallOwner } from "../plugins/manifest-install-owner.js";
 import {
   listOfficialExternalPluginCatalogEntries,
@@ -57,10 +55,7 @@ const ORIGINAL_STDOUT_TTY = Object.getOwnPropertyDescriptor(process.stdout, "isT
 const PROFILE_STATE_ROOT = "/tmp/openclaw-ledger-profile";
 
 function expectedNpmInstallSpec(spec: string): string {
-  return resolveNpmInstallSpecsForUpdateChannel({
-    spec,
-    updateChannel: resolveRegistryUpdateChannel({ currentVersion: VERSION }),
-  }).installSpec;
+  return VERSION.includes("-beta.") ? `${spec.replace(/@latest$/, "")}@beta` : spec;
 }
 
 const OFFICIAL_EXTERNAL_NPM_INSTALLS_WITHOUT_INTEGRITY = listOfficialExternalPluginCatalogEntries()

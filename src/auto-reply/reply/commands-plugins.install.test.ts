@@ -4,8 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withTempHome } from "../../config/home-env.test-harness.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { resolveRegistryUpdateChannel } from "../../infra/update-channels.js";
-import { resolveNpmInstallSpecsForUpdateChannel } from "../../plugins/install-channel-specs.js";
 import { invokePluginArtifactInstallMock } from "../../plugins/test-helpers/install-fixtures.js";
 import { expectObjectFields, mockFirstObjectArg } from "../../test-utils/mock-call-assertions.js";
 import { VERSION } from "../../version.js";
@@ -66,10 +64,7 @@ vi.mock("../../plugins/install-persistence.js", async (importOriginal) => ({
 const workspaceHarness = createCommandWorkspaceHarness("openclaw-command-plugins-install-");
 
 function expectedNpmInstallSpec(spec: string): string {
-  return resolveNpmInstallSpecsForUpdateChannel({
-    spec,
-    updateChannel: resolveRegistryUpdateChannel({ currentVersion: VERSION }),
-  }).installSpec;
+  return VERSION.includes("-beta.") ? `${spec.replace(/@latest$/, "")}@beta` : spec;
 }
 
 function buildPluginsParams(

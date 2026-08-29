@@ -4,9 +4,7 @@ import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginInstallRecord as PersistedPluginInstallRecord } from "../config/types.plugins.js";
-import { resolveRegistryUpdateChannel } from "../infra/update-channels.js";
 import type { PluginEnableResult } from "../plugins/enable.js";
-import { resolveNpmInstallSpecsForUpdateChannel } from "../plugins/install-channel-specs.js";
 import type { PluginInstallArtifactConsentHandler } from "../plugins/install-types.js";
 import { createColdPluginFixture } from "../plugins/test-helpers/cold-plugin-fixtures.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
@@ -14,10 +12,7 @@ import { VERSION } from "../version.js";
 import { WizardNavigationError } from "../wizard/prompts.js";
 
 function expectedNpmInstallSpec(spec: string): string {
-  return resolveNpmInstallSpecsForUpdateChannel({
-    spec,
-    updateChannel: resolveRegistryUpdateChannel({ currentVersion: VERSION }),
-  }).installSpec;
+  return VERSION.includes("-beta.") ? `${spec.replace(/@latest$/, "")}@beta` : spec;
 }
 
 const resolveBundledInstallPlanForCatalogEntry = vi.hoisted(() =>
@@ -1011,13 +1006,7 @@ describe("ensureOnboardingPluginInstalled", () => {
       NpmSpecInstallCall,
     ];
     expect(npmCall.spec).toBe(
-      resolveNpmInstallSpecsForUpdateChannel({
-        spec: "@openclaw/codex",
-        updateChannel: "stable",
-        officialPackageName: "@openclaw/codex",
-        coreVersion: VERSION,
-        versionBoundToCore: true,
-      }).installSpec,
+      VERSION.includes("-beta.") ? "@openclaw/codex@beta" : `@openclaw/codex@${VERSION}`,
     );
     const [, recordUpdate] = readFirstMockCall(recordPluginInstall, "recordPluginInstall") as [
       OpenClawConfig,
