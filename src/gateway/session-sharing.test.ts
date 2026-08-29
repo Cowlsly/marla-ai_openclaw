@@ -270,7 +270,13 @@ describe("session sharing policy", () => {
             context: { getRuntimeConfig: () => cfg } as GatewayRequestContext,
           }).error,
         ).toMatchObject({ details: { code: "SESSION_PARTICIPATION_REQUIRED" } });
-        for (const method of ["sessions.companion.ask", "sessions.companion.state"]) {
+        for (const method of [
+          "chat.history",
+          "chat.startup",
+          "chat.metadata",
+          "sessions.companion.ask",
+          "sessions.companion.state",
+        ]) {
           expect(
             resolveSessionMutationAuthorization({
               client: viewer,
