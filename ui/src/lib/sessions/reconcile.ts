@@ -73,6 +73,7 @@ export function appendSessionResults(
 
 type SessionChangedEventInfo = {
   key: string;
+  sessionId?: string;
   updatedAt: number | null;
   thinkingLevel?: string | null;
   agentId: string | null;
@@ -322,6 +323,7 @@ function parseSessionChangedEvent(payload: unknown): ParsedSessionChangedEvent |
   return [
     {
       key,
+      sessionId: stringValue(recordValue(source, "sessionId")),
       updatedAt: typeof updatedAt === "number" ? updatedAt : null,
       thinkingLevel:
         typeof thinkingLevel === "string"

@@ -401,11 +401,15 @@ describe("createSessionCapability", () => {
       sessions.delete(key, { expectedSessionId: "session-before-replacement" }),
     ).resolves.toEqual({ deleted: false });
     expect(sessions.state.deletedSessions).toEqual([]);
-    expect(request).toHaveBeenCalledWith("sessions.delete", {
-      key,
-      deleteTranscript: true,
-      expectedSessionId: "session-before-replacement",
-    });
+    expect(request).toHaveBeenCalledWith(
+      "sessions.delete",
+      {
+        key,
+        deleteTranscript: true,
+        expectedSessionId: "session-before-replacement",
+      },
+      { timeoutMs: 10 * 60_000 },
+    );
     sessions.dispose();
   });
 
@@ -451,11 +455,15 @@ describe("createSessionCapability", () => {
     expect(deletedSnapshots.some((keys) => keys.includes(deletedKey))).toBe(true);
     expect(deletedSnapshots.some((keys) => keys.includes(keptKey))).toBe(false);
     expect(request).toHaveBeenCalledTimes(4);
-    expect(request).toHaveBeenCalledWith("sessions.delete", {
-      key: deletedKey,
-      deleteTranscript: true,
-      archivedOnly: true,
-    });
+    expect(request).toHaveBeenCalledWith(
+      "sessions.delete",
+      {
+        key: deletedKey,
+        deleteTranscript: true,
+        archivedOnly: true,
+      },
+      { timeoutMs: 10 * 60_000 },
+    );
     unsubscribe();
     sessions.dispose();
   });

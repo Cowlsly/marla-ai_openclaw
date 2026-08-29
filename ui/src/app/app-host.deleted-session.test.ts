@@ -2,10 +2,18 @@
 
 import type { RouteLocation, RouterState } from "@openclaw/uirouter";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
+import type { GatewayBrowserClient } from "../api/gateway.ts";
 import type { RouteId } from "../app-routes.ts";
+import { createSessionCapability } from "../lib/sessions/index.ts";
+import {
+  createGatewayHarness,
+  sessionsResult,
+} from "../lib/sessions/session-capability.test-support.ts";
 import { createStorageMock } from "../test-helpers/storage.ts";
 import { selectShellRouteState } from "./app-host-route-state.ts";
 import { resetAppHostTestGlobals } from "./app-host.test-support.ts";
+import { createChatAttachmentHandoff } from "./chat-attachment-handoff.ts";
 import type { ApplicationContext } from "./context.ts";
 import "./app-host.ts";
 
@@ -17,6 +25,7 @@ type DeletedSessionShell = {
   replaceChatWithCurrentSession: () => void;
   updateRouteState: (state: ReturnType<typeof selectShellRouteState>) => void;
   observeDeletedSessions: (state: ApplicationContext["sessions"]["state"]) => void;
+  recoverDeletedActiveSession: (state: ApplicationContext["sessions"]["state"]) => void;
 };
 
 const mainKey = "agent:main:main";
@@ -27,6 +36,7 @@ function createSessionRecoveryShell(params: {
   agentIds?: string[];
   sessionKeys: string[];
   deletedSessionKeys?: string[];
+  sessions?: ApplicationContext["sessions"];
 }) {
   const replace = vi.fn();
   const setSessionKey = vi.fn();
@@ -48,7 +58,9 @@ function createSessionRecoveryShell(params: {
         setSessionKey,
         snapshot: { client: null, hello: null, phase: "connected" },
       },
-      sessions: {
+      sessions: params.sessions ?? {
+        deletionState: (key: string) =>
+          params.deletedSessionKeys?.includes(key) ? "confirmed" : undefined,
         state: {
           deletedSessions: (params.deletedSessionKeys ?? []).map((key) => ({
             agentId: "main",
@@ -72,6 +84,134 @@ afterEach(() => {
 });
 
 describe("OpenClaw shell deleted-session recovery", () => {
+  it.each(["rejection", "batch interruption", "different-client batch rejection"] as const)(
+    "navigates on delete intent and visibly reports %s without replacing newer navigation",
+    async (failure) => {
+      const response = createDeferred<{ deleted: boolean }>();
+      const request = vi.fn(async (method: string) => {
+        if (method === "sessions.delete") {
+          return response.promise;
+        }
+        if (method === "sessions.subscribe") {
+          return { subscribed: true };
+        }
+        return sessionsResult([], 1);
+      });
+      const { gateway, publish } = createGatewayHarness({
+        request,
+      } as unknown as GatewayBrowserClient);
+      const sessions = createSessionCapability(gateway);
+      const { shell, replace } = createSessionRecoveryShell({
+        activeSessionKey: deletedKey,
+        sessionKeys: [deletedKey, mainKey],
+        sessions,
+      });
+      const stop = sessions.subscribe((state) => shell.recoverDeletedActiveSession(state));
+      const toast = document.body.appendChild(document.createElement("openclaw-toast-host"));
+      try {
+        const operation =
+          failure === "rejection"
+            ? sessions.delete(deletedKey)
+            : sessions.deleteMany([{ key: deletedKey }, { key: "agent:main:unsent" }]);
+        expect(shell.activeSessionKey).toBe(mainKey);
+        expect(sessions.deletionState(deletedKey)).toBe("pending");
+        expect(sessions.state.deletedSessions).toEqual([]);
+        expect(replace).toHaveBeenCalledExactlyOnceWith("chat", { pathname: "/chat/main" });
+        shell.activeSessionKey = "agent:main:another-thread";
+        replace.mockClear();
+        if (failure === "rejection") {
+          response.reject(new Error("delete rejected"));
+          await expect(operation).rejects.toThrow("delete rejected");
+        } else {
+          publish(false);
+          publish(
+            true,
+            failure === "different-client batch rejection"
+              ? ({ request } as unknown as GatewayBrowserClient)
+              : gateway.snapshot.client,
+          );
+          if (failure === "different-client batch rejection") {
+            response.reject(new Error("old client rejected deletion"));
+          } else {
+            response.resolve({ deleted: true });
+          }
+          await operation;
+          expect(
+            request.mock.calls.filter(([method]) => method === "sessions.delete"),
+          ).toHaveLength(1);
+        }
+        expect(shell.activeSessionKey).toBe("agent:main:another-thread");
+        expect(replace).not.toHaveBeenCalled();
+        if (failure === "different-client batch rejection") {
+          expect(toast.textContent).toBe("");
+          expect(sessions.state.error).toBeNull();
+        } else {
+          await vi.waitFor(() =>
+            expect(toast.textContent).toContain(
+              failure === "rejection" ? "delete rejected" : "Gateway connection replaced",
+            ),
+          );
+        }
+      } finally {
+        stop();
+        sessions.dispose();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "preserves the replacement when confirmation selected its predecessor (previously deleted: %s)",
+    async (previouslyDeleted) => {
+      const response = createDeferred<{ deleted: boolean }>();
+      const replacement = {
+        key: deletedKey,
+        sessionId: "replacement",
+        kind: "direct" as const,
+        updatedAt: 2,
+      };
+      let listed = previouslyDeleted ? { ...replacement, sessionId: "predecessor" } : replacement;
+      const request = vi.fn(async (method: string) =>
+        method === "sessions.delete" ? response.promise : sessionsResult([listed], 2),
+      );
+      const { gateway } = createGatewayHarness({ request } as unknown as GatewayBrowserClient);
+      const sessions = createSessionCapability(gateway);
+      await sessions.refresh({ force: true });
+      if (previouslyDeleted) {
+        sessions.reconcileChanged({ sessionKey: deletedKey, reason: "delete" });
+        listed = replacement;
+        await sessions.refresh({ force: true });
+      }
+      const { shell, replace } = createSessionRecoveryShell({
+        activeSessionKey: deletedKey,
+        sessionKeys: [deletedKey],
+        sessions,
+      });
+      const stop = sessions.subscribe((state) => shell.recoverDeletedActiveSession(state));
+      const toast = document.body.appendChild(document.createElement("openclaw-toast-host"));
+      const operation = sessions.delete(deletedKey, { expectedSessionId: "predecessor" });
+      try {
+        expect(shell.activeSessionKey).toBe(deletedKey);
+        expect(replace).not.toHaveBeenCalled();
+        expect(sessions.state.result?.sessions).toEqual([replacement]);
+        expect(request).toHaveBeenCalledWith(
+          "sessions.delete",
+          expect.objectContaining({ key: deletedKey, expectedSessionId: "predecessor" }),
+          expect.any(Object),
+        );
+        response.reject(new Error("Session identity changed"));
+        await expect(operation).rejects.toThrow("Session identity changed");
+        await vi.waitFor(() => expect(toast.textContent).toContain("Session identity changed"));
+        expect(shell.activeSessionKey).toBe(deletedKey);
+        expect(sessions.state.result?.sessions).toEqual([replacement]);
+      } finally {
+        response.resolve({ deleted: false });
+        await operation.catch(() => {});
+        stop();
+        sessions.dispose();
+      }
+    },
+  );
+
   it("retires an externally observed batch once and shows one actionable cleanup failure", async () => {
     const gatewayUrl = "ws://gateway.test";
     const storage = createStorageMock();
@@ -102,6 +242,7 @@ describe("OpenClaw shell deleted-session recovery", () => {
     shell.runtime = {
       context: {
         agents: { state: { agentsList: null } },
+        chatAttachmentHandoff: createChatAttachmentHandoff(),
         gateway: {
           snapshot: {
             assistantAgentId: "main",
@@ -113,6 +254,14 @@ describe("OpenClaw shell deleted-session recovery", () => {
     };
     const toast = document.body.appendChild(document.createElement("openclaw-toast-host"));
 
+    shell.observeDeletedSessions({
+      ...state,
+      deletedSessions: [],
+    });
+    await import("../lib/chat/composer-draft-retirement.runtime.ts");
+    expect(
+      storage.getItem(`openclaw.control.chatComposer.v2:${encodeURIComponent(gatewayUrl)}`),
+    ).toContain("retire me");
     shell.observeDeletedSessions(state);
     shell.observeDeletedSessions(state);
 
