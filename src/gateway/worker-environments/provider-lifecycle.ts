@@ -384,6 +384,10 @@ export function createWorkerProviderLifecycle(options: WorkerProviderLifecycleOp
     if (r.state === "requested") {
       return cancelRequested(requireCurrentOwner(r));
     }
+    // Fence local authority even when the provider is unavailable. stopOwner preserves
+    // shared/unknown-host stop acknowledgements before releasing their attachments.
+    r = await stopOwner(r, "provider-destroying");
+    r = r.nodeDeviceId !== null && r.sharedHost === false ? r : beginDrain(r);
     const owningProvider = provider ?? providerFor(r.providerId);
     let leaseId = r.leaseId;
     if (!leaseId) {
@@ -409,9 +413,7 @@ export function createWorkerProviderLifecycle(options: WorkerProviderLifecycleOp
     // A dedicated provider's destroy result proves physical teardown even if its node is
     // offline. Shared hosts retain the machine, so they still require the exact worker stop.
     const providerOwnsMachine = r.nodeDeviceId !== null && r.sharedHost === false;
-    const stopped = await stopOwner(r, providerOwnsMachine ? "provider-destroying" : undefined);
-    const draining = providerOwnsMachine ? stopped : beginDrain(stopped);
-    const destroying = providerOwnsMachine ? draining : beginDestroy(draining);
+    const destroying = providerOwnsMachine ? r : beginDestroy(r);
     try {
       await callProvider(r.environmentId, () => {
         requireCurrentOwner(destroying);
