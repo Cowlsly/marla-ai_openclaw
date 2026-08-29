@@ -102,7 +102,7 @@ describe("embedded desktop panel presentation", () => {
       control: false,
     });
 
-    const nextInventory = createDeferred<void>();
+    const nextInventory = createDeferred();
     refresh = nextInventory.promise;
     panel.requestedSource = replacement.id;
     await panel.updateComplete;
