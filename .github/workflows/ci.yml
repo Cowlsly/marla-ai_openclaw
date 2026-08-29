@@ -3893,7 +3893,69 @@ jobs:
           else
             swift_test_args+=(--no-parallel)
           fi
-          swift test "${swift_test_args[@]}"
+          swift test "${swift_test_args[@]}" <&0 &
+          swift_test_pid=$!
+          diagnostic_pid=
+          stop_diagnostic() {
+            if [[ -n "$diagnostic_pid" ]]; then
+              kill "$diagnostic_pid" 2>/dev/null || true
+              wait "$diagnostic_pid" 2>/dev/null || true
+              diagnostic_pid=
+            fi
+          }
+          trap stop_diagnostic EXIT
+          cancel_swift_test() {
+            stop_diagnostic
+            kill -s "$1" "$swift_test_pid" 2>/dev/null || true
+            swift_test_status=0
+            wait "$swift_test_pid" || swift_test_status=$?
+            exit "$swift_test_status"
+          }
+          trap 'cancel_swift_test INT' INT
+          trap 'cancel_swift_test TERM' TERM
+          trap 'cancel_swift_test HUP' HUP
+
+          # Temporary: sample only this invocation's long-lived Swift Testing runner.
+          # Runner uptime excludes cold compilation; remove after the parallel stall is diagnosed.
+          (
+            diagnostic_pid=
+            sample_file=
+            trap 'stop_diagnostic; [[ -z "$sample_file" ]] || rm -f "$sample_file"' EXIT
+            trap 'exit 0' INT TERM HUP
+            while kill -0 "$swift_test_pid" 2>/dev/null; do
+              runner_pid="$(/usr/bin/pgrep -P "$swift_test_pid" -x swiftpm-testing || true)"
+              if [[ "$runner_pid" =~ ^[0-9]+$ ]] &&
+                /bin/ps -p "$swift_test_pid,$runner_pid" -o pid=,ppid=,etime=,ucomm= |
+                  awk -v step="$$" -v swift="$swift_test_pid" -v runner="$runner_pid" '
+                    $1 == swift && $2 == step { owned = 1 }
+                    $1 == runner && $2 == swift && $4 == "swiftpm-testing" {
+                      fields = split($3, elapsed, /[-:]/)
+                      ready = fields > 2 || elapsed[1] >= 1
+                    }
+                    END { exit !(owned && ready) }
+                  '; then
+                sample_file="$(mktemp "$RUNNER_TEMP/swift-stall.XXXXXX")"
+                echo "::group::Temporary Swift runner stack (pid $runner_pid, age >=60s, 2s sample)"
+                /usr/bin/sample "$runner_pid" 2 -file "$sample_file" >/dev/null 2>&1 &
+                diagnostic_pid=$!
+                if ! wait "$diagnostic_pid"; then
+                  echo "::warning::Swift runner stack sampling failed; test status is unchanged."
+                fi
+                diagnostic_pid=
+                head -c 262144 "$sample_file"
+                printf '\n::endgroup::\n'
+                exit 0
+              fi
+              sleep 5 &
+              diagnostic_pid=$!
+              wait "$diagnostic_pid"
+              diagnostic_pid=
+            done
+          ) &
+          diagnostic_pid=$!
+          swift_test_status=0
+          wait "$swift_test_pid" || swift_test_status=$?
+          exit "$swift_test_status"
 
       - name: Save SwiftPM cache
         if: needs.preflight.outputs.cache_write_allowed == 'true' && steps.swiftpm-cache.outputs.cache-hit != 'true'
