@@ -305,6 +305,7 @@ export async function updateGitInstall(params: {
       timeoutMs: effectiveTimeout,
       env: installEnv,
       installCwd: updateRoot,
+      expectedSourceRoot: updateRoot,
     });
     steps.push(...packageUpdate.steps);
 

@@ -124,6 +124,23 @@ async function resolveCanonicalPath(filePath: string): Promise<string> {
   return path.resolve(await fs.realpath(filePath).catch(() => filePath));
 }
 
+async function collectExpectedSourceRootErrors(
+  packageRoot: string,
+  expectedSourceRoot: string,
+): Promise<string[]> {
+  try {
+    const [actual, expected] = await Promise.all([
+      fs.realpath(packageRoot),
+      fs.realpath(expectedSourceRoot),
+    ]);
+    return path.resolve(actual) === path.resolve(expected)
+      ? []
+      : [`global package root resolves to ${actual}, expected source checkout ${expected}`];
+  } catch (error) {
+    return [`could not verify expected source checkout: ${formatErrorMessage(error)}`];
+  }
+}
+
 async function runPnpmPreflightProbe(params: {
   installTarget: ResolvedGlobalInstallTarget;
   args: string[];
@@ -875,6 +892,7 @@ export async function runGlobalPackageUpdateSteps(params: {
   timeoutMs: number;
   env?: NodeJS.ProcessEnv;
   installCwd?: string;
+  expectedSourceRoot?: string;
   postVerifyStep?: (packageRoot: string) => Promise<PackageUpdateStepResult | null>;
 }): Promise<PackageUpdateStepsResult> {
   let stagedInstall: StagedNpmInstall | null = null;
@@ -1187,10 +1205,12 @@ export async function runGlobalPackageUpdateSteps(params: {
         params.packageName,
         params.installSpec,
       );
-      const verificationErrors = await collectInstalledGlobalPackageErrors({
-        packageRoot: verificationPackageRoot,
-        expectedVersion,
-      });
+      const verificationErrors = params.expectedSourceRoot
+        ? await collectExpectedSourceRootErrors(verificationPackageRoot, params.expectedSourceRoot)
+        : await collectInstalledGlobalPackageErrors({
+            packageRoot: verificationPackageRoot,
+            expectedVersion,
+          });
       if (verificationErrors.length > 0) {
         steps.push({
           name: "global install verify",
