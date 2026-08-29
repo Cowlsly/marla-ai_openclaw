@@ -735,7 +735,7 @@ class OpenClawShell
     snapshot: ApplicationContext["gateway"]["snapshot"],
     runtimeConfig = this.context?.runtimeConfig,
   ) {
-    this.shellGateway.ensureRuntimeConfig(snapshot, runtimeConfig);
+    void this.shellGateway.ensureRuntimeConfig(snapshot, runtimeConfig).catch(() => undefined);
   }
 
   enabledRouteIds(): readonly RouteId[] {
@@ -753,7 +753,7 @@ class OpenClawShell
     snapshot: ApplicationContext["gateway"]["snapshot"],
     agents = this.context?.agents,
   ) {
-    this.shellGateway.ensureAgentsList(snapshot, agents);
+    void this.shellGateway.ensureAgentsList(snapshot, agents).catch(() => undefined);
   }
 
   private updateRouteState(routeState: ShellRouteState) {
