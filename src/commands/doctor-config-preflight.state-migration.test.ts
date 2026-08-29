@@ -408,43 +408,17 @@ describe("runDoctorConfigPreflight state migration", () => {
     const snapshot = await readConfigFileSnapshot();
     readConfigFileSnapshot.mockClear();
     const index = { plugins: [{ pluginId: "legacy-plugin" }] };
-    readConfigFileSnapshotWithPluginMetadata
-      .mockResolvedValueOnce({
+    for (const registrySource of ["derived", "derived", "derived", "persisted"] as const) {
+      readConfigFileSnapshotWithPluginMetadata.mockResolvedValueOnce({
         snapshot,
         pluginMetadataSnapshot: {
           configFingerprint: "plugin-migrations",
           index,
           registryIndex: index,
-          registrySource: "derived",
-        },
-      })
-      .mockResolvedValueOnce({
-        snapshot,
-        pluginMetadataSnapshot: {
-          configFingerprint: "plugin-migrations",
-          index,
-          registryIndex: index,
-          registrySource: "derived",
-        },
-      })
-      .mockResolvedValueOnce({
-        snapshot,
-        pluginMetadataSnapshot: {
-          configFingerprint: "plugin-migrations",
-          index,
-          registryIndex: index,
-          registrySource: "derived",
-        },
-      })
-      .mockResolvedValueOnce({
-        snapshot,
-        pluginMetadataSnapshot: {
-          configFingerprint: "plugin-migrations",
-          index,
-          registryIndex: index,
-          registrySource: "persisted",
+          registrySource,
         },
       });
+    }
     needsStateMigrationCheckpoint.mockReturnValue(true);
 
     await runDoctorConfigPreflight(stateCheckpointOptions);
