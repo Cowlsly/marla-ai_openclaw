@@ -1,6 +1,6 @@
 // tsdown config defines package build entrypoints and output options.
 import fs from "node:fs";
-import { createRequire, isBuiltin } from "node:module";
+import { isBuiltin } from "node:module";
 import path from "node:path";
 import type { UserConfig } from "tsdown";
 import {
@@ -169,18 +169,6 @@ function nodeBuildConfig(
     sourcemap: OUTPUT_SOURCE_MAPS,
     inputOptions: (options) => buildInputOptions(options),
   };
-}
-
-function fsSafeNativeCopy(): UserConfig["copy"] {
-  const packageRoot = path.dirname(
-    createRequire(import.meta.url).resolve("@openclaw/fs-safe/package.json"),
-  );
-  return ({ outDir }) => ({
-    from: path.join(packageRoot, "dist/native"),
-    // Both package graphs resolve this canonical directory, so npm ships one
-    // native tree even though their emitted loaders have different depths.
-    to: path.resolve(outDir, "..", "dist"),
-  });
 }
 
 function workerDeployBuildConfig(): UserConfig {
@@ -773,7 +761,6 @@ const configs = [
       // and bundled hooks in one graph so runtime singletons are emitted once.
       entry: unifiedDistEntries,
       deps: unifiedDeps,
-      copy: fsSafeNativeCopy(),
       plugins: [createStateSchemaInlinePlugin()],
     },
     false,

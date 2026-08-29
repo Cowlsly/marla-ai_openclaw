@@ -55,6 +55,26 @@ function nativeAssetInventory(directory: string) {
     }));
 }
 
+function resolveInstalledFsSafeNativePackage(): { name: string; root: string } {
+  const require = createRequire(import.meta.url);
+  const fsSafeManifestPath = require.resolve("@openclaw/fs-safe/package.json");
+  const fsSafeManifest = JSON.parse(fs.readFileSync(fsSafeManifestPath, "utf8")) as {
+    optionalDependencies?: Record<string, string>;
+  };
+  const resolveFromFsSafe = createRequire(fsSafeManifestPath);
+  for (const name of Object.keys(fsSafeManifest.optionalDependencies ?? {})) {
+    if (!name.startsWith("@openclaw/fs-safe-")) {
+      continue;
+    }
+    try {
+      return { name, root: path.dirname(resolveFromFsSafe.resolve(name)) };
+    } catch {
+      // npm installs only the package matching the current OS, CPU, and libc.
+    }
+  }
+  throw new Error("matching @openclaw/fs-safe platform package is not installed");
+}
+
 const FS_SAFE_CALLER_PROBE = `
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -62,24 +82,22 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 const [entry, observer, rootDir, mode, outcome] = process.argv.slice(1);
-const { root } = await import(pathToFileURL(entry).href);
-const { configureFsSafeNative, getFsSafeNativeConfig, FsSafeError } = await import(pathToFileURL(observer).href);
+await import(pathToFileURL(entry).href);
+const { configureFsSafeNative, getFsSafeNativeConfig, FsSafeError, sha256File } = await import(pathToFileURL(observer).href);
 assert.equal(getFsSafeNativeConfig().mode, mode === "configured" ? "off" : mode);
 if (mode === "configured") configureFsSafeNative({ mode: "require" });
-const scoped = await root(rootDir);
+const fixture = path.join(rootDir, "fixture.txt");
+fs.writeFileSync(fixture, "native proof");
 if (outcome === "missing") {
-  await assert.rejects(scoped.write("proof.txt", "native proof"), (error) => {
+  await assert.rejects(sha256File(fixture), (error) => {
     assert(error instanceof FsSafeError);
     assert.equal(error.code, "helper-unavailable");
     assert.equal(error.cause?.code, "MODULE_NOT_FOUND");
     return true;
   });
-  assert.deepEqual(fs.readdirSync(rootDir), []);
 } else {
-  await scoped.write("proof.txt", "native proof");
-  await scoped.create("created.txt", "create proof");
-  assert.equal(fs.readFileSync(path.join(rootDir, "proof.txt"), "utf8"), "native proof");
-  assert.equal(fs.readFileSync(path.join(rootDir, "created.txt"), "utf8"), "create proof");
+  const result = await sha256File(fixture);
+  assert.equal(result.digest, "e5cfaf7a7198b559e4141adafc7e9d20bfab0d61311f84ae9efe0300dadac9cc");
 }
 const loaded = Object.keys(createRequire(import.meta.url).cache).filter((file) => file.endsWith("fs-safe-native.node"));
 assert.equal(loaded.length, outcome === "native" ? 1 : 0);
@@ -88,16 +106,13 @@ if (loaded.length) assert(loaded[0].startsWith(path.dirname(rootDir) + path.sep)
 
 describe("tsdown config", () => {
   it.each(["runtime", "worker"])(
-    "preserves native fs-safe assets and policy in relocated %s output",
+    "resolves the installed fs-safe platform package from relocated %s output",
     async (target) => {
       const temporaryRoot = fs.realpathSync(createTempDir("openclaw-tsdown-fs-safe-"));
       const sourceRoot = path.join(temporaryRoot, "build");
       const relocatedRoot = path.join(temporaryRoot, "relocated");
       const require = createRequire(import.meta.url);
-      const nativeSource = path.join(
-        path.dirname(require.resolve("@openclaw/fs-safe/package.json")),
-        "dist/native",
-      );
+      const nativePackage = resolveInstalledFsSafeNativePackage();
       const sdkSource = path.resolve("src/plugin-sdk/memory-core-host-engine-fs.ts");
       const observerSource = path.join(temporaryRoot, "observer.ts");
       fs.writeFileSync(
@@ -106,6 +121,7 @@ describe("tsdown config", () => {
           `export { root } from ${JSON.stringify(sdkSource)};`,
           `export { configureFsSafeNative, getFsSafeNativeConfig } from ${JSON.stringify(require.resolve("@openclaw/fs-safe/config"))};`,
           `export { FsSafeError } from ${JSON.stringify(require.resolve("@openclaw/fs-safe/errors"))};`,
+          `export { sha256File } from ${JSON.stringify(require.resolve("@openclaw/fs-safe/durability"))};`,
         ].join("\n"),
       );
       const worker = target === "worker";
@@ -113,13 +129,7 @@ describe("tsdown config", () => {
         worker ? isWorkerDeployConfig : (config) => config.name === TSDOWN_UNIFIED_CONFIG_GROUP,
       );
       expect(selected).toBeDefined();
-      if (worker) {
-        expect(selected?.copy).toBeUndefined();
-      } else {
-        expect(selected?.copy).toBeDefined();
-      }
-      // Deliberately not named dist: the dependency's URL is relative to the
-      // emitted loader, including the worker's extra directory component.
+      expect(selected?.copy).toBeUndefined();
       const bundles = await build({
         ...selected,
         config: false,
@@ -131,11 +141,13 @@ describe("tsdown config", () => {
         logLevel: "silent",
       });
       try {
-        if (worker) {
-          // The runtime graph owns the package's single native tree; this
-          // isolated worker build only proves that its loader shares it.
-          fs.cpSync(nativeSource, path.join(sourceRoot, "dist/native"), { recursive: true });
-        }
+        const nativeOutput = path.join(
+          sourceRoot,
+          "node_modules",
+          ...nativePackage.name.split("/"),
+        );
+        fs.mkdirSync(path.dirname(nativeOutput), { recursive: true });
+        fs.cpSync(nativePackage.root, nativeOutput, { recursive: true });
         fs.writeFileSync(path.join(sourceRoot, "package.json"), '{"type":"module"}');
         fs.renameSync(sourceRoot, relocatedRoot);
         const entry = path.join(
@@ -143,7 +155,11 @@ describe("tsdown config", () => {
           worker ? "output/worker/worker.mjs" : "output/plugin-sdk/memory-core-host-engine-fs.js",
         );
         const observer = worker ? entry : path.join(relocatedRoot, "output/observer.js");
-        const nativeOutput = path.join(relocatedRoot, "dist/native");
+        const relocatedNativeOutput = path.join(
+          relocatedRoot,
+          "node_modules",
+          ...nativePackage.name.split("/"),
+        );
         const probe = async (
           name: string,
           mode: string,
@@ -210,10 +226,10 @@ describe("tsdown config", () => {
           probe("shared-config", "configured", "native"),
           probe("default", "off", "fallback"),
         ]);
-        const assets = nativeAssetInventory(nativeSource);
-        expect(assets).toHaveLength(7);
-        expect(nativeAssetInventory(nativeOutput)).toEqual(assets);
-        fs.rmSync(nativeOutput, { recursive: true });
+        const assets = nativeAssetInventory(nativePackage.root);
+        expect(assets.some((asset) => asset.file.endsWith(".node"))).toBe(true);
+        expect(nativeAssetInventory(relocatedNativeOutput)).toEqual(assets);
+        fs.rmSync(relocatedNativeOutput, { recursive: true });
         await joinProbes([
           probe("missing", "require", "missing", { FS_SAFE_NATIVE_MODE: "require" }),
           ...["off", "auto"].map((mode) =>
