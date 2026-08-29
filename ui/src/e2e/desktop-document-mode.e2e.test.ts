@@ -342,6 +342,32 @@ suite.define(() => {
         control: false,
       });
       await panel.locator("[data-test-remote-desktop='true']").waitFor();
+      await gateway.setMethodResponse("sessions.describe", {
+        session: {
+          key: sessionKey,
+          kind: "direct",
+          updatedAt: 2,
+          ...scenario.session,
+          placement: { state: "reclaimed" },
+        },
+      });
+      await gateway.setMethodResponse("environments.list", {
+        environments: [gatewayEnvironment, { ...scenario.environment, desktop: true }],
+      });
+      await gateway.emitGatewayEvent("sessions.changed", { sessionKey, reason: "reclaim" });
+      await panel.getByText("Desktop sources", { exact: true }).waitFor();
+      expect(await panel.locator("[data-test-remote-desktop='true']").count()).toBe(0);
+      expect(await gateway.getRequests("desktop.observe")).toHaveLength(1);
+
+      await gateway.setMethodResponse("sessions.describe", {
+        session: { key: sessionKey, kind: "direct", updatedAt: 3, ...scenario.session },
+      });
+      await gateway.emitGatewayEvent("sessions.changed", { sessionKey, reason: "placement" });
+      await panel.locator("[data-test-remote-desktop='true']").waitFor();
+      expect((await gateway.getRequests("desktop.observe")).at(-1)?.params).toEqual({
+        source: scenario.source,
+        control: false,
+      });
       await mkdir(artifactDirectory, { recursive: true });
       await page.screenshot({
         path: path.join(

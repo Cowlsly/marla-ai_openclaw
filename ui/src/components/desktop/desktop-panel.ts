@@ -39,6 +39,7 @@ import {
   renderDesktopPanelHeader,
   renderDesktopPicker,
 } from "./desktop-panel-view.ts";
+import { DesktopSessionController } from "./desktop-session-controller.ts";
 import { desktopSourceForEnvironment } from "./desktop-source.ts";
 
 /** `<openclaw-desktop-panel>` — dockable RFB access to Gateway desktop sources. */
@@ -84,6 +85,15 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
   private launchOperationId = 0;
   private controlTakeoverRecoveryUsed = false;
   private sourceSelection: "pending" | "resolved" | "picker" = "pending";
+  private readonly sessionSource = new DesktopSessionController(
+    this,
+    () => this.environmentId,
+    (target) => {
+      this.returnToPicker();
+      this.sourceSelection = "pending";
+      void this.refreshEnvironments(undefined, target);
+    },
+  );
   private readonly mobileKeyboard = new DesktopMobileKeyboard({
     connection: () => this.connection,
     controlling: () => this.controlling,
@@ -222,6 +232,7 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
   }
 
   private returnToPicker(): void {
+    this.sessionSource.invalidate();
     this.disconnectConnection();
     this.clearLaunchState();
     this.state = "picker";
@@ -249,7 +260,10 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
     this.launchErrorText = null;
   }
 
-  private async refreshEnvironments(expectedOperationId?: number): Promise<boolean> {
+  private async refreshEnvironments(
+    expectedOperationId?: number,
+    resolvedSessionTarget?: string | null,
+  ): Promise<boolean> {
     const client = this.client;
     if (!client || !this.available || (this.embedded && !this.presented)) {
       return false;
@@ -279,12 +293,15 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
       }
     }
     if (refreshed) {
-      await this.resolveRequestedSource(operationId);
+      await this.resolveRequestedSource(operationId, resolvedSessionTarget);
     }
     return refreshed;
   }
 
-  private async resolveRequestedSource(operationId: number): Promise<void> {
+  private async resolveRequestedSource(
+    operationId: number,
+    resolvedSessionTarget?: string | null,
+  ): Promise<void> {
     if (this.sourceSelection !== "pending" || operationId !== this.operationId) {
       return;
     }
@@ -295,6 +312,7 @@ class OpenClawDesktopPanel extends OpenClawLitElement {
       // Embedded presenters already receive the chat owner's current placement; do not rediscover it.
       sessionKey: this.documentMode ? this.sessionKey : null,
       environments: this.environments,
+      resolvedSessionTarget,
     });
     if (operationId !== this.operationId) {
       return;

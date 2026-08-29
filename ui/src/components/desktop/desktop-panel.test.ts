@@ -2,13 +2,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
-import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import type { GatewayBrowserClient, GatewayEventListener } from "../../api/gateway.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import "./desktop-panel.ts";
 
 type DesktopPanelElement = HTMLElement & {
   available: boolean;
+  documentMode: boolean;
   client: GatewayBrowserClient | null;
   desktopClientFactory: () => {
     connect(options: { onConnect: () => void }): Promise<{ disconnect(): void }>;
@@ -122,6 +123,103 @@ describe("embedded desktop panel presentation", () => {
     expect(disconnect).toHaveBeenCalledTimes(2);
     expect(connect).toHaveBeenCalledTimes(2);
     expect(request.mock.calls.some(([method]) => method === "sessions.describe")).toBe(false);
+  });
+
+  it("keeps focused session updates current across control changes and overlapping lookups", async () => {
+    const sessionKey = "agent:main:focused";
+    const active = {
+      key: sessionKey,
+      kind: "direct",
+      placement: { state: "active", environmentId: desktopEnvironment.id },
+    };
+    const reclaimed = { ...active, placement: { state: "reclaimed" } };
+    let sessionRead: Promise<unknown> | undefined;
+    let listener: GatewayEventListener = () => {
+      throw new Error("expected a focused session listener");
+    };
+    const unsubscribe = vi.fn();
+    const request = vi.fn(async (method: string, params?: { control?: boolean }) => {
+      if (method === "environments.list") {
+        return { environments: [desktopEnvironment] };
+      }
+      if (method === "sessions.describe") {
+        return sessionRead ?? { session: active };
+      }
+      return {
+        transport: "rfb",
+        wsPath: "/desktop/observe?token=focused",
+        expiresAtMs: 60_000,
+        control: params?.control ?? false,
+      };
+    });
+    const disconnect = vi.fn();
+    const connect = vi.fn(async (options: { onConnect: () => void }) => {
+      options.onConnect();
+      return { disconnect };
+    });
+    const panel = createPanel();
+    panel.client = {
+      gatewayUrl: "ws://gateway.test",
+      request,
+      addEventListener: (next: GatewayEventListener) => {
+        listener = next;
+        return unsubscribe;
+      },
+    } as unknown as GatewayBrowserClient;
+    panel.available = true;
+    panel.documentMode = true;
+    panel.sessionKey = sessionKey;
+    panel.desktopClientFactory = () => ({ connect });
+    document.body.append(panel);
+    await waitForFast(() => expect(connect).toHaveBeenCalledOnce());
+    const descriptions = () =>
+      request.mock.calls.filter(([method]) => method === "sessions.describe");
+    const changed = (key = sessionKey) =>
+      listener({ type: "event", event: "sessions.changed", payload: { sessionKey: key } });
+
+    changed("agent:main:unrelated");
+    await settleTasks();
+    expect(descriptions()).toHaveLength(1);
+    changed();
+    await waitForFast(() => expect(descriptions()).toHaveLength(2));
+    await settleTasks();
+    expect(disconnect).not.toHaveBeenCalled();
+
+    const pending = createDeferred<unknown>();
+    sessionRead = pending.promise;
+    changed();
+    await waitForFast(() => expect(descriptions()).toHaveLength(3));
+    const control = panel.renderRoot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Take control"]',
+    );
+    if (!control) {
+      throw new Error("expected focused Desktop control button");
+    }
+    control.click();
+    await waitForFast(() => expect(connect).toHaveBeenCalledTimes(2));
+    pending.resolve({ session: reclaimed });
+    await waitForFast(() =>
+      expect(panel.renderRoot.querySelector(".desktop-picker")).not.toBeNull(),
+    );
+    expect(disconnect).toHaveBeenCalledTimes(2);
+
+    sessionRead = undefined;
+    changed();
+    await waitForFast(() => expect(connect).toHaveBeenCalledTimes(3));
+    const stale = createDeferred<unknown>();
+    sessionRead = stale.promise;
+    changed();
+    await waitForFast(() => expect(descriptions()).toHaveLength(5));
+    sessionRead = Promise.resolve({ session: reclaimed });
+    changed();
+    await waitForFast(() =>
+      expect(panel.renderRoot.querySelector(".desktop-picker")).not.toBeNull(),
+    );
+    stale.resolve({ session: active });
+    await settleTasks();
+    expect(connect).toHaveBeenCalledTimes(3);
+    panel.remove();
+    expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
   it("keeps a hidden embedded mount dormant even when the standalone dock was open", async () => {

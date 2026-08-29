@@ -43,7 +43,7 @@ See [Cloud Workers](/gateway/cloud-workers) for profiles, requirements, dispatch
 
 ## Viewing the session desktop
 
-Open **Desktop** from a session to view its execution machine. Cloud sessions select their worker desktop; sessions on paired devices select that device. The pop-out window keeps the session in its link and resolves the current machine when opened. When placement changes, the embedded viewer disconnects from the previous machine. A stopped cloud session does not switch the viewer to the Gateway desktop.
+Open **Desktop** from a session to view its execution machine. Cloud sessions select their worker desktop; sessions on paired devices select that device. The pop-out window keeps the session in its link. Both viewers follow placement changes and disconnect from the previous machine when the session moves or stops. A stopped cloud session does not switch either viewer to the Gateway desktop.
 
 The machine must already support desktop viewing. For cloud workers, enable the [Cloud Worker Desktop lab and desktop profile setting](/gateway/cloud-workers#desktop-interactive). Opening Desktop starts in view-only mode and does not change the machine's permissions or the agent's tool policy. The global Desktop command in the command palette still opens the machine picker, including on chat pages.
 
