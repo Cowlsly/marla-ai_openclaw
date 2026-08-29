@@ -41,6 +41,12 @@ Configure a profile under `cloudWorkers.profiles` and the bundled Crabbox plugin
 
 See [Cloud Workers](/gateway/cloud-workers) for profiles, requirements, dispatching, moving sessions between destinations, and the security model.
 
+## Viewing the session desktop
+
+Open **Desktop** from a session to view its execution machine. Cloud sessions select their worker desktop; sessions on paired devices select that device. The pop-out window keeps the session in its link and resolves the current machine when opened. When placement changes, the embedded viewer disconnects from the previous machine. A stopped cloud session does not switch the viewer to the Gateway desktop.
+
+The machine must already support desktop viewing. For cloud workers, enable the [Cloud Worker Desktop lab and desktop profile setting](/gateway/cloud-workers#desktop-interactive). Opening Desktop starts in view-only mode and does not change the machine's permissions or the agent's tool policy. Standalone Desktop still offers the machine picker.
+
 ## Automatic load balancing across devices
 
 You do not have to pick a device. Choosing **Auto** (least-busy device) in the Place picker — or dispatching with `autoDevice: true` — selects a paired session host automatically and retries up to three ranked hosts if provisioning fails before a machine is allocated. OpenClaw `worker-turn` placements rank hosts by most free worker slots, breaking ties by device ID; Codex `remote-exec` placements do not consume worker slots, so eligible hosts are ranked by device ID alone. When no host qualifies, the error says exactly why: no session hosts paired, all disconnected, or all at capacity.

@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
@@ -15,6 +16,8 @@ type DesktopPanelElement = HTMLElement & {
   embedded: boolean;
   handleToggleRequest(event: Event): void;
   presented: boolean;
+  requestedSource: string | null;
+  sessionKey: string | null;
   renderRoot: DocumentFragment;
   updateComplete: Promise<unknown>;
 };
@@ -61,6 +64,64 @@ describe("embedded desktop panel presentation", () => {
   afterEach(() => {
     document.body.replaceChildren();
     vi.unstubAllGlobals();
+  });
+
+  it("follows the session desktop and retires its connection before resolving a new placement", async () => {
+    const replacement = { ...desktopEnvironment, id: "worker-desktop-2" };
+    let refresh: Promise<void> | undefined;
+    const request = vi.fn(async (method: string) => {
+      if (method === "environments.list") {
+        await refresh;
+        return { environments: [desktopEnvironment, replacement] };
+      }
+      return {
+        transport: "rfb",
+        wsPath: "/desktop/observe?token=session",
+        expiresAtMs: 60_000,
+        control: false,
+      };
+    });
+    const disconnect = vi.fn();
+    const connect = vi.fn(async (options: { onConnect: () => void }) => {
+      options.onConnect();
+      return { disconnect };
+    });
+    const panel = createPanel();
+    panel.client = { gatewayUrl: "ws://gateway.test", request } as unknown as GatewayBrowserClient;
+    panel.available = true;
+    panel.embedded = true;
+    panel.presented = true;
+    panel.sessionKey = "agent:main:cloud";
+    panel.requestedSource = desktopEnvironment.id;
+    panel.desktopClientFactory = () => ({ connect });
+    document.body.append(panel);
+
+    await waitForFast(() => expect(connect).toHaveBeenCalledOnce());
+    expect(request).toHaveBeenCalledWith("desktop.observe", {
+      source: { kind: "environment", environmentId: desktopEnvironment.id },
+      control: false,
+    });
+
+    const nextInventory = createDeferred<void>();
+    refresh = nextInventory.promise;
+    panel.requestedSource = replacement.id;
+    await panel.updateComplete;
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(connect).toHaveBeenCalledOnce();
+    nextInventory.resolve();
+    refresh = undefined;
+    await waitForFast(() => expect(connect).toHaveBeenCalledTimes(2));
+    expect(request).toHaveBeenLastCalledWith("desktop.observe", {
+      source: { kind: "environment", environmentId: replacement.id },
+      control: false,
+    });
+
+    panel.requestedSource = null;
+    await panel.updateComplete;
+    await settleTasks();
+    expect(disconnect).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.some(([method]) => method === "sessions.describe")).toBe(false);
   });
 
   it("keeps a hidden embedded mount dormant even when the standalone dock was open", async () => {
